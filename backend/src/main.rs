@@ -7,6 +7,9 @@
 //! 4. Executes D3D11 commands on the real GPU
 //! 5. Presents frames via window or shared texture
 
+// Allow dead code during development - this is a skeleton implementation
+#![allow(dead_code)]
+
 mod command_processor;
 mod config;
 mod d3d11;
@@ -21,12 +24,10 @@ pub use protocol::*;
 
 fn main() -> Result<()> {
     // Initialize logging
-    let subscriber = FmtSubscriber::builder()
+    FmtSubscriber::builder()
         .with_max_level(Level::DEBUG)
         .with_target(true)
         .init();
-
-    let _ = subscriber; // Suppress unused warning
 
     info!("PVGPU Backend Service starting...");
     info!(
