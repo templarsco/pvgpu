@@ -1,0 +1,67 @@
+# Rust
+/backend/target/
+**/*.rs.bk
+Cargo.lock
+
+# C/C++ build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# Windows Driver
+*.sys
+*.cat
+*.cer
+*.inf.bak
+x64/
+x86/
+ARM64/
+Debug/
+Release/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.ncb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build directories
+build/
+out/
+bin/
+obj/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test artifacts
+*.log
+*.tmp
+
+# Package files
+*.zip
+*.tar.gz
+*.7z
