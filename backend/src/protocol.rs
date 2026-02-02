@@ -30,7 +30,8 @@ pub const PVGPU_FEATURE_HDR: u64 = 1 << 6;
 pub const PVGPU_FEATURE_VSYNC: u64 = 1 << 7;
 pub const PVGPU_FEATURE_TRIPLE_BUFFER: u64 = 1 << 8;
 
-pub const PVGPU_FEATURES_MVP: u64 = PVGPU_FEATURE_D3D11 | PVGPU_FEATURE_COMPUTE | PVGPU_FEATURE_VSYNC;
+pub const PVGPU_FEATURES_MVP: u64 =
+    PVGPU_FEATURE_D3D11 | PVGPU_FEATURE_COMPUTE | PVGPU_FEATURE_VSYNC;
 
 // =============================================================================
 // Command Types
@@ -98,6 +99,7 @@ pub const PVGPU_ERROR_UNKNOWN: u32 = 0xFFFF;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ResourceType {
     Texture1D = 1,
     Texture2D = 2,
@@ -122,6 +124,7 @@ pub enum ResourceType {
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ShaderStage {
     Vertex = 0,
     Pixel = 1,
@@ -136,7 +139,7 @@ pub enum ShaderStage {
 // =============================================================================
 
 /// Control Region at offset 0 of shared memory.
-/// 
+///
 /// SAFETY: This struct must match the exact memory layout of PvgpuControlRegion in C.
 /// It is designed to be mapped directly to shared memory.
 #[repr(C)]
@@ -145,34 +148,34 @@ pub struct ControlRegion {
     pub magic: u32,
     pub version: u32,
     pub features: u64,
-    
+
     // Ring configuration - 0x010
     pub ring_offset: u32,
     pub ring_size: u32,
     pub heap_offset: u32,
     pub heap_size: u32,
-    
+
     // Producer-consumer pointers - 0x020
     // These are atomic in C, we use AtomicU64 for Rust
     producer_ptr_raw: u64,
     consumer_ptr_raw: u64,
-    
+
     // Fence synchronization - 0x030
     guest_fence_request_raw: u64,
     host_fence_completed_raw: u64,
-    
+
     // Status and error - 0x040
     pub status: u32,
     pub error_code: u32,
     pub error_data: u32,
     _reserved1: u32,
-    
+
     // Display configuration - 0x050
     pub display_width: u32,
     pub display_height: u32,
     pub display_refresh: u32,
     pub display_format: u32,
-    
+
     // Reserved - 0x060 to 0xFFF
     _reserved: [u8; 0xFA0],
 }
@@ -188,7 +191,7 @@ impl ControlRegion {
         }
         Ok(())
     }
-    
+
     /// Get producer pointer atomically.
     pub fn producer_ptr(&self) -> u64 {
         // SAFETY: The memory is properly aligned and we're doing atomic read
@@ -197,7 +200,7 @@ impl ControlRegion {
             (*ptr).load(Ordering::Acquire)
         }
     }
-    
+
     /// Get consumer pointer atomically.
     pub fn consumer_ptr(&self) -> u64 {
         unsafe {
@@ -205,7 +208,7 @@ impl ControlRegion {
             (*ptr).load(Ordering::Acquire)
         }
     }
-    
+
     /// Set consumer pointer atomically (called by host).
     pub fn set_consumer_ptr(&self, value: u64) {
         unsafe {
@@ -213,7 +216,7 @@ impl ControlRegion {
             (*ptr).store(value, Ordering::Release);
         }
     }
-    
+
     /// Get host fence completed value.
     pub fn host_fence_completed(&self) -> u64 {
         unsafe {
@@ -221,7 +224,7 @@ impl ControlRegion {
             (*ptr).load(Ordering::Acquire)
         }
     }
-    
+
     /// Set host fence completed value (called by host after completing work).
     pub fn set_host_fence_completed(&self, value: u64) {
         unsafe {
@@ -229,12 +232,12 @@ impl ControlRegion {
             (*ptr).store(value, Ordering::Release);
         }
     }
-    
+
     /// Check if there are pending commands in the ring.
     pub fn has_pending_commands(&self) -> bool {
         self.producer_ptr() > self.consumer_ptr()
     }
-    
+
     /// Get number of pending bytes in the ring.
     pub fn pending_bytes(&self) -> u64 {
         self.producer_ptr().saturating_sub(self.consumer_ptr())
@@ -260,7 +263,9 @@ pub struct CommandHeader {
 pub const PVGPU_CMD_HEADER_SIZE: usize = std::mem::size_of::<CommandHeader>();
 
 // Command flags
+#[allow(dead_code)]
 pub const PVGPU_CMD_FLAG_SYNC: u32 = 1 << 0;
+#[allow(dead_code)]
 pub const PVGPU_CMD_FLAG_NO_FENCE: u32 = 1 << 1;
 
 // =============================================================================
@@ -287,6 +292,7 @@ pub struct CmdCreateResource {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct CmdSetRenderTarget {
     pub header: CommandHeader,
     pub num_rtvs: u32,
@@ -370,6 +376,7 @@ pub struct CmdClearRenderTarget {
 // =============================================================================
 
 /// Align a value to 16-byte boundary.
+#[allow(dead_code)]
 pub const fn align16(x: usize) -> usize {
     (x + 15) & !15
 }
@@ -377,12 +384,12 @@ pub const fn align16(x: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_control_region_size() {
         assert_eq!(std::mem::size_of::<ControlRegion>(), 4096);
     }
-    
+
     #[test]
     fn test_command_header_size() {
         assert_eq!(std::mem::size_of::<CommandHeader>(), 16);

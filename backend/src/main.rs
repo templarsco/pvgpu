@@ -7,14 +7,14 @@
 //! 4. Executes D3D11 commands on the real GPU
 //! 5. Presents frames via window or shared texture
 
-mod protocol;
-mod d3d11;
 mod command_processor;
-mod presentation;
 mod config;
+mod d3d11;
+mod presentation;
+mod protocol;
 
 use anyhow::Result;
-use tracing::{info, error, Level};
+use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 pub use protocol::*;
@@ -25,21 +25,26 @@ fn main() -> Result<()> {
         .with_max_level(Level::DEBUG)
         .with_target(true)
         .init();
-    
+
+    let _ = subscriber; // Suppress unused warning
+
     info!("PVGPU Backend Service starting...");
-    info!("Protocol version: {}.{}", PVGPU_VERSION_MAJOR, PVGPU_VERSION_MINOR);
-    
+    info!(
+        "Protocol version: {}.{}",
+        PVGPU_VERSION_MAJOR, PVGPU_VERSION_MINOR
+    );
+
     // TODO: Parse command line arguments / config file
     // TODO: Connect to QEMU named pipe
     // TODO: Map shared memory
     // TODO: Initialize D3D11
     // TODO: Start command processing loop
-    
+
     info!("Backend service initialized. Waiting for connections...");
-    
+
     // For now, just a placeholder
     println!("PVGPU Backend - Not yet fully implemented");
     println!("This is a skeleton for the host backend service.");
-    
+
     Ok(())
 }

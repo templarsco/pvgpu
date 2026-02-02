@@ -2,9 +2,10 @@
 //!
 //! Handles configuration file parsing and command-line arguments.
 
-use serde::{Deserialize, Serialize};
 use std::path::Path;
+
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 /// Backend configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,31 +13,31 @@ pub struct Config {
     /// Named pipe path for QEMU connection
     #[serde(default = "default_pipe_path")]
     pub pipe_path: String,
-    
+
     /// Shared memory file path (Windows file mapping)
     #[serde(default)]
     pub shmem_path: Option<String>,
-    
+
     /// GPU adapter index (0 = default)
     #[serde(default)]
     pub adapter_index: u32,
-    
+
     /// Presentation mode: "headless", "windowed", "dual"
     #[serde(default = "default_presentation_mode")]
     pub presentation_mode: String,
-    
+
     /// Initial display width
     #[serde(default = "default_width")]
     pub width: u32,
-    
+
     /// Initial display height
     #[serde(default = "default_height")]
     pub height: u32,
-    
+
     /// VSync enabled
     #[serde(default = "default_vsync")]
     pub vsync: bool,
-    
+
     /// Number of frame buffers (2 or 3)
     #[serde(default = "default_buffer_count")]
     pub buffer_count: u32,
@@ -88,7 +89,7 @@ impl Config {
         let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
-    
+
     /// Save configuration to a TOML file.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let content = toml::to_string_pretty(self)?;

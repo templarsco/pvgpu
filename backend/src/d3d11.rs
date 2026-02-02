@@ -2,9 +2,10 @@
 //!
 //! Handles D3D11 device creation and command execution.
 
-use anyhow::Result;
 use std::collections::HashMap;
-use tracing::{info, debug, warn};
+
+use anyhow::Result;
+use tracing::{debug, info, warn};
 
 /// Resource ID type
 pub type ResourceId = u32;
@@ -42,18 +43,18 @@ pub enum Resource {
 
 impl D3D11Renderer {
     /// Create a new D3D11 renderer with the specified adapter.
-    pub fn new(adapter_index: Option<u32>) -> Result<Self> {
+    pub fn new(_adapter_index: Option<u32>) -> Result<Self> {
         info!("Creating D3D11 device...");
-        
+
         // TODO: Call D3D11CreateDevice
         // TODO: Select adapter if specified
-        
+
         Ok(Self {
             resources: HashMap::new(),
             next_resource_id: 1,
         })
     }
-    
+
     /// Create a resource and return its ID.
     pub fn create_resource(&mut self, resource: Resource) -> ResourceId {
         let id = self.next_resource_id;
@@ -62,7 +63,7 @@ impl D3D11Renderer {
         debug!("Created resource {}", id);
         id
     }
-    
+
     /// Destroy a resource by ID.
     pub fn destroy_resource(&mut self, id: ResourceId) -> bool {
         if self.resources.remove(&id).is_some() {
@@ -73,19 +74,22 @@ impl D3D11Renderer {
             false
         }
     }
-    
+
     /// Execute a draw call.
     pub fn draw(&mut self, vertex_count: u32, start_vertex: u32) {
         debug!("Draw: {} vertices from {}", vertex_count, start_vertex);
         // TODO: ID3D11DeviceContext::Draw
     }
-    
+
     /// Execute an indexed draw call.
     pub fn draw_indexed(&mut self, index_count: u32, start_index: u32, base_vertex: i32) {
-        debug!("DrawIndexed: {} indices from {}, base {}", index_count, start_index, base_vertex);
+        debug!(
+            "DrawIndexed: {} indices from {}, base {}",
+            index_count, start_index, base_vertex
+        );
         // TODO: ID3D11DeviceContext::DrawIndexed
     }
-    
+
     /// Present the current frame.
     pub fn present(&mut self, backbuffer_id: ResourceId, sync_interval: u32) {
         debug!("Present: backbuffer {}, sync {}", backbuffer_id, sync_interval);
