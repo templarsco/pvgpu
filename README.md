@@ -23,18 +23,18 @@ On Windows, your options are limited:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Windows Guest (10/11)                                          │
-│  └── Game/App (DX11) → WDDM Paravirt Driver (KMD + UMD)        │
+│  └── Game/App (DX11) → WDDM Paravirt Driver (KMD + UMD)         │
 │            │                                                    │
 │            ▼ Shared Memory (Command Rings + Fences)             │
 ├─────────────────────────────────────────────────────────────────┤
 │  QEMU (WHPX acceleration)                                       │
-│  └── qemu-pvgpu device (PCIe virtual, BAR0 config, BAR2 shmem) │
+│  └── qemu-pvgpu device (PCIe virtual, BAR0 config, BAR2 shmem)  │
 │            │                                                    │
 │            ▼                                                    │
 ├─────────────────────────────────────────────────────────────────┤
 │  Host Backend Service (Rust)                                    │
-│  └── D3D11 Renderer → Real GPU (NVIDIA/AMD)                    │
-│  └── Presentation: Local window + Headless/Streaming           │
+│  └── D3D11 Renderer → Real GPU (NVIDIA/AMD)                     │
+│  └── Presentation: Local window + Headless/Streaming            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
