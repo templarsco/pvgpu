@@ -16,9 +16,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
-use windows::Win32::Storage::FileSystem::{
-    ReadFile, WriteFile, FlushFileBuffers,
-};
+use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
     PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
@@ -82,9 +80,7 @@ impl PipeServer {
         info!("Creating named pipe server at: {}", pipe_path);
 
         // Create shutdown event
-        let shutdown_event = unsafe {
-            CreateEventW(None, true, false, None)?
-        };
+        let shutdown_event = unsafe { CreateEventW(None, true, false, None)? };
 
         Ok(Self {
             pipe_path: pipe_path.to_string(),

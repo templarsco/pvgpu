@@ -66,12 +66,7 @@ impl CommandProcessor {
 
         debug!(
             "CreateResource: id={}, type={}, {}x{}x{}, format={}",
-            cmd.header.resource_id,
-            cmd.resource_type,
-            cmd.width,
-            cmd.height,
-            cmd.depth,
-            cmd.format
+            cmd.header.resource_id, cmd.resource_type, cmd.width, cmd.height, cmd.depth, cmd.format
         );
 
         let resource_id = cmd.header.resource_id;

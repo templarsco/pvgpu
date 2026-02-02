@@ -25,11 +25,11 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC,
     D3D11_VIEWPORT,
 };
-use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_DESC1,
-};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_DESC1,
 };
 
 /// Resource ID type (matches guest resource IDs)
@@ -224,7 +224,8 @@ impl D3D11Renderer {
             (Some(adapter), info)
         };
 
-        info!("Using GPU: {} (VRAM: {} MB)", 
+        info!(
+            "Using GPU: {} (VRAM: {} MB)",
             adapter_info.description,
             adapter_info.dedicated_video_memory / (1024 * 1024)
         );
@@ -252,7 +253,9 @@ impl D3D11Renderer {
 
         unsafe {
             D3D11CreateDevice(
-                adapter.as_ref().map(|a| a as &windows::Win32::Graphics::Dxgi::IDXGIAdapter),
+                adapter
+                    .as_ref()
+                    .map(|a| a as &windows::Win32::Graphics::Dxgi::IDXGIAdapter),
                 driver_type,
                 None,
                 flags,
@@ -424,7 +427,10 @@ impl D3D11Renderer {
 
         let buffer = buffer.ok_or_else(|| anyhow!("Failed to create buffer"))?;
 
-        debug!("Created Buffer: id={}, size={}, bind_flags={}", id, size, bind_flags);
+        debug!(
+            "Created Buffer: id={}, size={}, bind_flags={}",
+            id, size, bind_flags
+        );
 
         self.resources.insert(
             id,
@@ -448,7 +454,11 @@ impl D3D11Renderer {
 
         let shader = shader.ok_or_else(|| anyhow!("Failed to create vertex shader"))?;
 
-        debug!("Created VertexShader: id={}, bytecode_size={}", id, bytecode.len());
+        debug!(
+            "Created VertexShader: id={}, bytecode_size={}",
+            id,
+            bytecode.len()
+        );
 
         self.resources.insert(
             id,
@@ -471,9 +481,14 @@ impl D3D11Renderer {
 
         let shader = shader.ok_or_else(|| anyhow!("Failed to create pixel shader"))?;
 
-        debug!("Created PixelShader: id={}, bytecode_size={}", id, bytecode.len());
+        debug!(
+            "Created PixelShader: id={}, bytecode_size={}",
+            id,
+            bytecode.len()
+        );
 
-        self.resources.insert(id, D3D11Resource::PixelShader { shader });
+        self.resources
+            .insert(id, D3D11Resource::PixelShader { shader });
 
         Ok(())
     }
@@ -560,7 +575,8 @@ impl D3D11Renderer {
             index_count, start_index, base_vertex
         );
         unsafe {
-            self.context.DrawIndexed(index_count, start_index, base_vertex);
+            self.context
+                .DrawIndexed(index_count, start_index, base_vertex);
         }
     }
 
