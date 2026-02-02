@@ -88,8 +88,7 @@ impl CommandProcessor {
     }
 
     fn handle_fence(&mut self, data: &[u8]) -> Result<()> {
-        let cmd: CmdFence =
-            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdFence) };
+        let cmd: CmdFence = unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdFence) };
         self.current_fence = cmd.fence_value;
         debug!("Fence: value={}", cmd.fence_value);
         // TODO: Signal fence to guest via IRQ
@@ -106,7 +105,10 @@ impl CommandProcessor {
     fn handle_clear_render_target(&mut self, data: &[u8]) -> Result<()> {
         let cmd: CmdClearRenderTarget =
             unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdClearRenderTarget) };
-        debug!("ClearRenderTarget: rtv={}, color={:?}", cmd.rtv_id, cmd.color);
+        debug!(
+            "ClearRenderTarget: rtv={}, color={:?}",
+            cmd.rtv_id, cmd.color
+        );
         // TODO: Call ID3D11DeviceContext::ClearRenderTargetView
         Ok(())
     }

@@ -92,7 +92,10 @@ impl D3D11Renderer {
 
     /// Present the current frame.
     pub fn present(&mut self, backbuffer_id: ResourceId, sync_interval: u32) {
-        debug!("Present: backbuffer {}, sync {}", backbuffer_id, sync_interval);
+        debug!(
+            "Present: backbuffer {}, sync {}",
+            backbuffer_id, sync_interval
+        );
         // TODO: Copy to presentation pipeline
     }
 }
