@@ -5,7 +5,7 @@
 use crate::d3d11::D3D11Renderer;
 use crate::protocol::*;
 use anyhow::Result;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 use windows::Win32::Graphics::Direct3D11::D3D11_VIEWPORT;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 

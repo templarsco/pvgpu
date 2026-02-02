@@ -7,24 +7,22 @@
 //! 3. Receive IRQ requests from host
 
 use std::ffi::c_void;
-use std::ptr;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
-use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};
+use windows::Win32::Storage::FileSystem::{
+    FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
-    PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
+    PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows::Win32::System::Threading::{
-    CreateEventW, ResetEvent, SetEvent, WaitForSingleObject, INFINITE,
-};
-use windows::Win32::System::IO::OVERLAPPED;
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 
 /// Messages from QEMU device to backend
 #[derive(Debug, Clone)]
