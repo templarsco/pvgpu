@@ -145,7 +145,7 @@ impl BackendService {
 
             // Process pending commands from ring buffer
             let mut processed = 0u64;
-            while let Some((data, pending)) = shmem.read_pending_commands() {
+            while let Some((data, _pending)) = shmem.read_pending_commands() {
                 if data.is_empty() {
                     break;
                 }

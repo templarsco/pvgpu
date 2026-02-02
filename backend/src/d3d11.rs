@@ -16,10 +16,10 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState,
     ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout,
     ID3D11PixelShader, ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState,
-    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader, D3D11_BIND_RENDER_TARGET,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
+    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader, D3D11_BIND_FLAG,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION,
+    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1};
@@ -28,6 +28,7 @@ use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFac
 pub type ResourceId = u32;
 
 /// D3D11 resource wrapper - holds the actual D3D11 objects
+#[allow(dead_code)]
 pub enum D3D11Resource {
     Texture2D {
         texture: ID3D11Texture2D,
@@ -87,6 +88,7 @@ pub struct AdapterInfo {
 }
 
 /// Holds all D3D11 resources and state
+#[allow(dead_code)]
 pub struct D3D11Renderer {
     /// D3D11 device
     device: ID3D11Device,
@@ -153,64 +155,28 @@ impl D3D11Renderer {
         // Create DXGI factory
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
 
-        // Get adapter
-        let (adapter, adapter_info) = if let Some(index) = adapter_index {
-            let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapters1(index)? };
-            let mut desc = DXGI_ADAPTER_DESC1::default();
-            unsafe {
-                adapter.GetDesc1(&mut desc)?;
-            }
+        // Get adapter and info
+        let index = adapter_index.unwrap_or(0);
+        let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapters1(index)? };
+        let desc = unsafe { adapter.GetDesc1()? };
 
-            let description = String::from_utf16_lossy(
-                &desc.Description[..desc
-                    .Description
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(desc.Description.len())],
-            );
+        let description = String::from_utf16_lossy(
+            &desc.Description[..desc
+                .Description
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(desc.Description.len())],
+        );
 
-            let luid =
-                ((desc.AdapterLuid.HighPart as u64) << 32) | (desc.AdapterLuid.LowPart as u64);
+        let luid = ((desc.AdapterLuid.HighPart as u64) << 32) | (desc.AdapterLuid.LowPart as u64);
 
-            let info = AdapterInfo {
-                index,
-                description,
-                vendor_id: desc.VendorId,
-                device_id: desc.DeviceId,
-                dedicated_video_memory: desc.DedicatedVideoMemory,
-                luid,
-            };
-
-            (Some(adapter), info)
-        } else {
-            // Use default adapter
-            let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapters1(0)? };
-            let mut desc = DXGI_ADAPTER_DESC1::default();
-            unsafe {
-                adapter.GetDesc1(&mut desc)?;
-            }
-
-            let description = String::from_utf16_lossy(
-                &desc.Description[..desc
-                    .Description
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(desc.Description.len())],
-            );
-
-            let luid =
-                ((desc.AdapterLuid.HighPart as u64) << 32) | (desc.AdapterLuid.LowPart as u64);
-
-            let info = AdapterInfo {
-                index: 0,
-                description,
-                vendor_id: desc.VendorId,
-                device_id: desc.DeviceId,
-                dedicated_video_memory: desc.DedicatedVideoMemory,
-                luid,
-            };
-
-            (Some(adapter), info)
+        let adapter_info = AdapterInfo {
+            index,
+            description,
+            vendor_id: desc.VendorId,
+            device_id: desc.DeviceId,
+            dedicated_video_memory: desc.DedicatedVideoMemory,
+            luid,
         };
 
         info!(
@@ -234,18 +200,10 @@ impl D3D11Renderer {
         let mut context: Option<ID3D11DeviceContext> = None;
         let mut achieved_level = D3D_FEATURE_LEVEL_11_0;
 
-        let driver_type = if adapter.is_some() {
-            D3D_DRIVER_TYPE_UNKNOWN
-        } else {
-            D3D_DRIVER_TYPE_HARDWARE
-        };
-
         unsafe {
             D3D11CreateDevice(
-                adapter
-                    .as_ref()
-                    .map(|a| a as &windows::Win32::Graphics::Dxgi::IDXGIAdapter),
-                driver_type,
+                &adapter,
+                D3D_DRIVER_TYPE_UNKNOWN,
                 None,
                 flags,
                 Some(&feature_levels),
@@ -311,14 +269,10 @@ impl D3D11Renderer {
                 Count: 1,
                 Quality: 0,
             },
-            Usage: if initial_data.is_some() {
-                D3D11_USAGE_DEFAULT
-            } else {
-                D3D11_USAGE_DEFAULT
-            },
-            BindFlags: bind_flags,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_FLAG(bind_flags as i32),
+            CPUAccessFlags: Default::default(),
+            MiscFlags: Default::default(),
         };
 
         let init_data = initial_data.map(|data| D3D11_SUBRESOURCE_DATA {
@@ -339,7 +293,7 @@ impl D3D11Renderer {
         let texture = texture.ok_or_else(|| anyhow!("Failed to create texture"))?;
 
         // Create SRV if shader resource bind flag is set
-        let srv = if bind_flags & D3D11_BIND_SHADER_RESOURCE.0 != 0 {
+        let srv = if (bind_flags & D3D11_BIND_SHADER_RESOURCE.0 as u32) != 0 {
             let mut srv: Option<ID3D11ShaderResourceView> = None;
             unsafe {
                 self.device
@@ -351,7 +305,7 @@ impl D3D11Renderer {
         };
 
         // Create RTV if render target bind flag is set
-        let rtv = if bind_flags & D3D11_BIND_RENDER_TARGET.0 != 0 {
+        let rtv = if (bind_flags & D3D11_BIND_RENDER_TARGET.0 as u32) != 0 {
             let mut rtv: Option<ID3D11RenderTargetView> = None;
             unsafe {
                 self.device
@@ -393,9 +347,9 @@ impl D3D11Renderer {
         let desc = D3D11_BUFFER_DESC {
             ByteWidth: size,
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: bind_flags,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
+            BindFlags: D3D11_BIND_FLAG(bind_flags as i32),
+            CPUAccessFlags: Default::default(),
+            MiscFlags: Default::default(),
             StructureByteStride: 0,
         };
 

@@ -6,8 +6,6 @@
 //! 2. Send doorbell notifications when new commands are available
 //! 3. Receive IRQ requests from host
 
-use std::ffi::c_void;
-
 use anyhow::{anyhow, Result};
 use tracing::{debug, info};
 use windows::core::PCWSTR;
@@ -46,6 +44,7 @@ pub enum BackendMessage {
 /// Wire protocol message types
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum MessageType {
     Handshake = 1,
     HandshakeAck = 2,
@@ -106,7 +105,7 @@ impl PipeServer {
                 4096, // In buffer size
                 0,    // Default timeout
                 None, // Default security
-            )?
+            )
         };
 
         if pipe == INVALID_HANDLE_VALUE {
@@ -134,17 +133,14 @@ impl PipeServer {
 
     /// Read a message from QEMU
     pub fn read_message(&self) -> Result<QemuMessage> {
-        // Read header
-        let mut header = MessageHeader {
-            msg_type: 0,
-            payload_size: 0,
-        };
+        // Read header into a buffer
+        let mut header_buf = [0u8; HEADER_SIZE];
         let mut bytes_read: u32 = 0;
 
         unsafe {
             ReadFile(
                 self.pipe_handle,
-                Some(&mut header as *mut _ as *mut c_void as *mut u8 as *mut [u8]),
+                Some(&mut header_buf),
                 Some(&mut bytes_read),
                 None,
             )?;
@@ -153,6 +149,9 @@ impl PipeServer {
         if bytes_read as usize != HEADER_SIZE {
             return Err(anyhow!("Incomplete header read: {} bytes", bytes_read));
         }
+
+        // Parse header
+        let header: MessageHeader = unsafe { std::ptr::read_unaligned(header_buf.as_ptr() as *const MessageHeader) };
 
         // Read payload if present
         let mut payload = vec![0u8; header.payload_size as usize];
@@ -215,15 +214,17 @@ impl PipeServer {
             payload_size: payload.len() as u32,
         };
 
+        // Serialize header to bytes
+        let header_bytes = unsafe {
+            std::slice::from_raw_parts(&header as *const _ as *const u8, HEADER_SIZE)
+        };
+
         // Write header
         let mut bytes_written: u32 = 0;
         unsafe {
             WriteFile(
                 self.pipe_handle,
-                Some(std::slice::from_raw_parts(
-                    &header as *const _ as *const u8,
-                    HEADER_SIZE,
-                )),
+                Some(header_bytes),
                 Some(&mut bytes_written),
                 None,
             )?;
