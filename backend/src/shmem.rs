@@ -3,12 +3,11 @@
 //! Maps the shared memory region created by QEMU for command ring
 //! and resource heap access.
 
-use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, Result};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::{
@@ -16,10 +15,7 @@ use windows::Win32::System::Memory::{
     MEMORY_MAPPED_VIEW_ADDRESS,
 };
 
-use crate::protocol::{
-    ControlRegion, PVGPU_COMMAND_RING_SIZE, PVGPU_CONTROL_REGION_SIZE, PVGPU_MAGIC,
-    PVGPU_VERSION_MAJOR,
-};
+use crate::protocol::{ControlRegion, PVGPU_MAGIC, PVGPU_VERSION_MAJOR};
 
 /// Shared memory region mapped from QEMU
 pub struct SharedMemory {

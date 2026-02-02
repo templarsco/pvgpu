@@ -9,14 +9,13 @@
 use std::ffi::c_void;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::mpsc;
 use tracing::{debug, info};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows::Win32::Storage::FileSystem::{
-    FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+    FlushFileBuffers, ReadFile, WriteFile, PIPE_ACCESS_DUPLEX,
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
@@ -281,44 +280,5 @@ impl Drop for PipeServer {
                 let _ = CloseHandle(self.shutdown_event);
             }
         }
-    }
-}
-
-/// Async wrapper for pipe server using Tokio
-pub struct AsyncPipeServer {
-    inner: PipeServer,
-    msg_tx: mpsc::Sender<QemuMessage>,
-    msg_rx: mpsc::Receiver<QemuMessage>,
-}
-
-impl AsyncPipeServer {
-    pub fn new(pipe_path: &str) -> Result<Self> {
-        let inner = PipeServer::new(pipe_path)?;
-        let (msg_tx, msg_rx) = mpsc::channel(64);
-        Ok(Self {
-            inner,
-            msg_tx,
-            msg_rx,
-        })
-    }
-
-    /// Run the pipe server in a blocking task
-    pub async fn run(&mut self) -> Result<()> {
-        // Wait for connection in blocking task
-        let pipe_path = self.inner.pipe_path.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let mut server = PipeServer::new(&pipe_path)?;
-            server.wait_for_connection()?;
-            Ok::<_, anyhow::Error>(server)
-        })
-        .await??;
-
-        self.inner = result;
-        Ok(())
-    }
-
-    /// Get sender for QEMU messages
-    pub fn message_sender(&self) -> mpsc::Sender<QemuMessage> {
-        self.msg_tx.clone()
     }
 }

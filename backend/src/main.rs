@@ -23,15 +23,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::command_processor::CommandProcessor;
 use crate::config::Config;
 use crate::d3d11::D3D11Renderer;
 use crate::ipc::{BackendMessage, PipeServer, QemuMessage};
-use crate::protocol::*;
 use crate::shmem::SharedMemory;
 
 pub use protocol::*;

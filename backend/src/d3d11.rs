@@ -22,9 +22,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
-use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_DESC1,
-};
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1};
 
 /// Resource ID type (matches guest resource IDs)
 pub type ResourceId = u32;
@@ -119,10 +117,7 @@ impl D3D11Renderer {
 
             match adapter {
                 Ok(adapter) => {
-                    let mut desc = DXGI_ADAPTER_DESC1::default();
-                    unsafe {
-                        adapter.GetDesc1(&mut desc)?;
-                    }
+                    let desc = unsafe { adapter.GetDesc1()? };
 
                     let description = String::from_utf16_lossy(
                         &desc.Description[..desc
