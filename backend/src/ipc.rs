@@ -199,7 +199,10 @@ impl PipeServer {
                 info!("Received shutdown from QEMU");
                 Ok(QemuMessage::Shutdown)
             }
-            _ => Err(anyhow!("Unknown message type: {}", header.msg_type)),
+            _ => {
+                let msg_type = header.msg_type;
+                Err(anyhow!("Unknown message type: {}", msg_type))
+            }
         }
     }
 
