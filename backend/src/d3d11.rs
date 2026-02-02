@@ -8,18 +8,19 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
+use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+    D3D_PRIMITIVE_TOPOLOGY,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState,
     ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout,
-    ID3D11PixelShader, ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState,
-    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader, D3D11_BIND_RENDER_TARGET,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH, D3D11_CLEAR_STENCIL,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_PRIMITIVE_TOPOLOGY,
-    D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    D3D11_VIEWPORT,
+    ID3D11PixelShader, ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11Resource,
+    ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION,
+    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1};
@@ -582,12 +583,16 @@ impl D3D11Renderer {
     ) {
         if buffer_id == 0 {
             // Unbind
+            let buffers: [Option<ID3D11Buffer>; 1] = [None];
+            let strides: [u32; 1] = [stride];
+            let offsets: [u32; 1] = [offset];
             unsafe {
                 self.context.IASetVertexBuffers(
                     slot,
-                    Some(&[None]),
-                    Some(&[stride]),
-                    Some(&[offset]),
+                    1,
+                    Some(buffers.as_ptr()),
+                    Some(strides.as_ptr()),
+                    Some(offsets.as_ptr()),
                 );
             }
             return;
@@ -598,12 +603,16 @@ impl D3D11Renderer {
                 "SetVertexBuffer: slot={}, buffer={}, stride={}, offset={}",
                 slot, buffer_id, stride, offset
             );
+            let buffers: [Option<ID3D11Buffer>; 1] = [Some(buffer.clone())];
+            let strides: [u32; 1] = [stride];
+            let offsets: [u32; 1] = [offset];
             unsafe {
                 self.context.IASetVertexBuffers(
                     slot,
-                    Some(&[Some(buffer.clone())]),
-                    Some(&[stride]),
-                    Some(&[offset]),
+                    1,
+                    Some(buffers.as_ptr()),
+                    Some(strides.as_ptr()),
+                    Some(offsets.as_ptr()),
                 );
             }
         } else {
@@ -688,7 +697,7 @@ impl D3D11Renderer {
         debug!("SetPrimitiveTopology: topology={}", topology);
         unsafe {
             self.context
-                .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY(topology as i32));
+                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY(topology as i32));
         }
     }
 
@@ -950,17 +959,9 @@ impl D3D11Renderer {
                 dsv_id, clear_flags, depth, stencil
             );
             unsafe {
-                let flags = if clear_flags & 1 != 0 {
-                    D3D11_CLEAR_DEPTH
-                } else {
-                    Default::default()
-                } | if clear_flags & 2 != 0 {
-                    D3D11_CLEAR_STENCIL
-                } else {
-                    Default::default()
-                };
+                // clear_flags: 1 = D3D11_CLEAR_DEPTH, 2 = D3D11_CLEAR_STENCIL
                 self.context
-                    .ClearDepthStencilView(dsv, flags, depth, stencil);
+                    .ClearDepthStencilView(dsv, clear_flags, depth, stencil);
             }
         } else {
             warn!("ClearDepthStencil: Invalid DSV ID {}", dsv_id);
@@ -969,19 +970,19 @@ impl D3D11Renderer {
 
     /// Copy entire resource
     pub fn copy_resource(&mut self, dst_id: ResourceId, src_id: ResourceId) {
-        let src_resource = match self.resources.get(&src_id) {
-            Some(D3D11Resource::Texture2D { texture, .. }) => Some(texture.clone().cast().ok()),
-            Some(D3D11Resource::Buffer { buffer, .. }) => Some(buffer.clone().cast().ok()),
+        let src_resource: Option<ID3D11Resource> = match self.resources.get(&src_id) {
+            Some(D3D11Resource::Texture2D { texture, .. }) => texture.cast().ok(),
+            Some(D3D11Resource::Buffer { buffer, .. }) => buffer.cast().ok(),
             _ => None,
         };
 
-        let dst_resource = match self.resources.get(&dst_id) {
-            Some(D3D11Resource::Texture2D { texture, .. }) => Some(texture.clone().cast().ok()),
-            Some(D3D11Resource::Buffer { buffer, .. }) => Some(buffer.clone().cast().ok()),
+        let dst_resource: Option<ID3D11Resource> = match self.resources.get(&dst_id) {
+            Some(D3D11Resource::Texture2D { texture, .. }) => texture.cast().ok(),
+            Some(D3D11Resource::Buffer { buffer, .. }) => buffer.cast().ok(),
             _ => None,
         };
 
-        if let (Some(Some(dst)), Some(Some(src))) = (dst_resource, src_resource) {
+        if let (Some(dst), Some(src)) = (dst_resource, src_resource) {
             debug!("CopyResource: dst={}, src={}", dst_id, src_id);
             unsafe {
                 self.context.CopyResource(&dst, &src);

@@ -9,18 +9,20 @@
 use anyhow::{anyhow, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{debug, error, info};
-use windows::core::{w, PCWSTR};
+use tracing::{debug, info};
+use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_RESOURCE_MISC_SHARED,
     D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIFactory2, IDXGISwapChain1, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_DISCARD,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIFactory2, IDXGISwapChain1, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -249,7 +251,7 @@ impl PresentationPipeline {
             BufferCount: 2,
             Scaling: windows::Win32::Graphics::Dxgi::DXGI_SCALING_STRETCH,
             SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
-            AlphaMode: windows::Win32::Graphics::Dxgi::DXGI_ALPHA_MODE_IGNORE,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
             Flags: 0,
         };
 
@@ -351,7 +353,7 @@ impl PresentationPipeline {
             // Present with vsync
             let sync_interval = if self.config.vsync { 1 } else { 0 };
             unsafe {
-                swapchain.Present(sync_interval, DXGI_PRESENT(0))?;
+                swapchain.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
             }
         }
 
@@ -410,7 +412,7 @@ impl PresentationPipeline {
             // Present with vsync
             let sync_interval = if self.config.vsync { 1 } else { 0 };
             unsafe {
-                swapchain.Present(sync_interval, DXGI_PRESENT(0))?;
+                swapchain.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
             }
         }
 
@@ -457,7 +459,13 @@ impl PresentationPipeline {
         // Resize swapchain if exists
         if let Some(ref swapchain) = self.swapchain {
             unsafe {
-                swapchain.ResizeBuffers(2, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0)?;
+                swapchain.ResizeBuffers(
+                    2,
+                    width,
+                    height,
+                    DXGI_FORMAT_R8G8B8A8_UNORM,
+                    DXGI_SWAP_CHAIN_FLAG(0),
+                )?;
             }
 
             // Recreate RTV
