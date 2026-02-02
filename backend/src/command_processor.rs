@@ -5,7 +5,9 @@
 use crate::d3d11::D3D11Renderer;
 use crate::protocol::*;
 use anyhow::Result;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
+use windows::Win32::Graphics::Direct3D11::D3D11_VIEWPORT;
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
 /// Processes commands from the shared memory ring buffer.
 pub struct CommandProcessor {
@@ -41,12 +43,14 @@ impl CommandProcessor {
         match header.command_type {
             PVGPU_CMD_CREATE_RESOURCE => self.handle_create_resource(cmd_data)?,
             PVGPU_CMD_DESTROY_RESOURCE => self.handle_destroy_resource(&header)?,
+            PVGPU_CMD_SET_RENDER_TARGET => self.handle_set_render_target(cmd_data)?,
+            PVGPU_CMD_SET_VIEWPORT => self.handle_set_viewport(cmd_data)?,
             PVGPU_CMD_DRAW => self.handle_draw(cmd_data)?,
             PVGPU_CMD_DRAW_INDEXED => self.handle_draw_indexed(cmd_data)?,
+            PVGPU_CMD_CLEAR_RENDER_TARGET => self.handle_clear_render_target(cmd_data)?,
             PVGPU_CMD_FENCE => self.handle_fence(cmd_data)?,
             PVGPU_CMD_PRESENT => self.handle_present(cmd_data)?,
-            PVGPU_CMD_CLEAR_RENDER_TARGET => self.handle_clear_render_target(cmd_data)?,
-            PVGPU_CMD_SET_VIEWPORT => self.handle_set_viewport(cmd_data)?,
+            PVGPU_CMD_FLUSH => self.handle_flush()?,
             PVGPU_CMD_SET_SHADER => self.handle_set_shader(cmd_data)?,
             _ => {
                 warn!("Unknown command type: 0x{:04X}", header.command_type);
@@ -59,17 +63,104 @@ impl CommandProcessor {
     fn handle_create_resource(&mut self, data: &[u8]) -> Result<()> {
         let cmd: CmdCreateResource =
             unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdCreateResource) };
+
         debug!(
-            "CreateResource: type={}, {}x{}",
-            cmd.resource_type, cmd.width, cmd.height
+            "CreateResource: id={}, type={}, {}x{}x{}, format={}",
+            cmd.header.resource_id,
+            cmd.resource_type,
+            cmd.width,
+            cmd.height,
+            cmd.depth,
+            cmd.format
         );
-        // TODO: Create actual D3D11 resource
+
+        let resource_id = cmd.header.resource_id;
+
+        match cmd.resource_type {
+            // Texture2D
+            2 => {
+                let format = DXGI_FORMAT(cmd.format as i32);
+                self.renderer.create_texture2d(
+                    resource_id,
+                    cmd.width,
+                    cmd.height,
+                    format,
+                    cmd.bind_flags,
+                    None, // TODO: Get initial data from heap
+                )?;
+            }
+            // Buffer
+            4 => {
+                self.renderer.create_buffer(
+                    resource_id,
+                    cmd.width, // For buffers, width is the size
+                    cmd.bind_flags,
+                    None, // TODO: Get initial data from heap
+                )?;
+            }
+            // VertexShader
+            5 => {
+                // Bytecode should be at heap_offset in shared memory
+                // For now, we can't access it directly - need shared memory reference
+                warn!("VertexShader creation requires shared memory access - not implemented");
+            }
+            // PixelShader
+            6 => {
+                warn!("PixelShader creation requires shared memory access - not implemented");
+            }
+            _ => {
+                warn!("Unknown resource type: {}", cmd.resource_type);
+            }
+        }
+
         Ok(())
     }
 
     fn handle_destroy_resource(&mut self, header: &CommandHeader) -> Result<()> {
         debug!("DestroyResource: id={}", header.resource_id);
         self.renderer.destroy_resource(header.resource_id);
+        Ok(())
+    }
+
+    fn handle_set_render_target(&mut self, data: &[u8]) -> Result<()> {
+        let cmd: CmdSetRenderTarget =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdSetRenderTarget) };
+
+        debug!(
+            "SetRenderTarget: num_rtvs={}, dsv_id={}",
+            cmd.num_rtvs, cmd.dsv_id
+        );
+
+        let rtv_ids: Vec<u32> = cmd.rtv_ids[..cmd.num_rtvs as usize].to_vec();
+        let dsv_id = if cmd.dsv_id == 0 {
+            None
+        } else {
+            Some(cmd.dsv_id)
+        };
+
+        self.renderer.set_render_targets(&rtv_ids, dsv_id)?;
+        Ok(())
+    }
+
+    fn handle_set_viewport(&mut self, data: &[u8]) -> Result<()> {
+        let cmd: CmdSetViewport =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdSetViewport) };
+
+        debug!("SetViewport: {} viewports", cmd.num_viewports);
+
+        let viewports: Vec<D3D11_VIEWPORT> = cmd.viewports[..cmd.num_viewports as usize]
+            .iter()
+            .map(|v| D3D11_VIEWPORT {
+                TopLeftX: v.x,
+                TopLeftY: v.y,
+                Width: v.width,
+                Height: v.height,
+                MinDepth: v.min_depth,
+                MaxDepth: v.max_depth,
+            })
+            .collect();
+
+        self.renderer.set_viewports(&viewports);
         Ok(())
     }
 
@@ -87,50 +178,74 @@ impl CommandProcessor {
         Ok(())
     }
 
+    fn handle_clear_render_target(&mut self, data: &[u8]) -> Result<()> {
+        let cmd: CmdClearRenderTarget =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdClearRenderTarget) };
+
+        debug!(
+            "ClearRenderTarget: rtv={}, color={:?}",
+            cmd.rtv_id, cmd.color
+        );
+
+        self.renderer.clear_render_target(cmd.rtv_id, &cmd.color);
+        Ok(())
+    }
+
     fn handle_fence(&mut self, data: &[u8]) -> Result<()> {
         let cmd: CmdFence = unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdFence) };
         self.current_fence = cmd.fence_value;
+
         debug!("Fence: value={}", cmd.fence_value);
-        // TODO: Signal fence to guest via IRQ
+
+        // Flush to ensure all prior commands are complete
+        self.renderer.flush();
+
         Ok(())
     }
 
     fn handle_present(&mut self, data: &[u8]) -> Result<()> {
         let cmd: CmdPresent =
             unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdPresent) };
+
+        debug!(
+            "Present: backbuffer={}, sync_interval={}",
+            cmd.backbuffer_id, cmd.sync_interval
+        );
+
         self.renderer.present(cmd.backbuffer_id, cmd.sync_interval);
         Ok(())
     }
 
-    fn handle_clear_render_target(&mut self, data: &[u8]) -> Result<()> {
-        let cmd: CmdClearRenderTarget =
-            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdClearRenderTarget) };
-        debug!(
-            "ClearRenderTarget: rtv={}, color={:?}",
-            cmd.rtv_id, cmd.color
-        );
-        // TODO: Call ID3D11DeviceContext::ClearRenderTargetView
-        Ok(())
-    }
-
-    fn handle_set_viewport(&mut self, data: &[u8]) -> Result<()> {
-        let cmd: CmdSetViewport =
-            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdSetViewport) };
-        debug!("SetViewport: {} viewports", cmd.num_viewports);
-        // TODO: Call ID3D11DeviceContext::RSSetViewports
+    fn handle_flush(&mut self) -> Result<()> {
+        debug!("Flush");
+        self.renderer.flush();
         Ok(())
     }
 
     fn handle_set_shader(&mut self, data: &[u8]) -> Result<()> {
         let cmd: CmdSetShader =
             unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdSetShader) };
+
         debug!("SetShader: stage={}, id={}", cmd.stage, cmd.shader_id);
-        // TODO: Call appropriate XXSetShader based on stage
+
+        // TODO: Implement shader binding based on stage
+        // 0 = Vertex, 1 = Pixel, 2 = Geometry, etc.
+
         Ok(())
     }
 
     /// Get the current fence value.
     pub fn current_fence(&self) -> u64 {
         self.current_fence
+    }
+
+    /// Get a reference to the renderer
+    pub fn renderer(&self) -> &D3D11Renderer {
+        &self.renderer
+    }
+
+    /// Get a mutable reference to the renderer
+    pub fn renderer_mut(&mut self) -> &mut D3D11Renderer {
+        &mut self.renderer
     }
 }

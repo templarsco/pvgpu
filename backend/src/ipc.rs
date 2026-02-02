@@ -158,10 +158,7 @@ impl PipeServer {
         }
 
         if bytes_read as usize != HEADER_SIZE {
-            return Err(anyhow!(
-                "Incomplete header read: {} bytes",
-                bytes_read
-            ));
+            return Err(anyhow!("Incomplete header read: {} bytes", bytes_read));
         }
 
         // Read payload if present
@@ -216,12 +213,8 @@ impl PipeServer {
     /// Send a message to QEMU
     pub fn send_message(&self, msg: BackendMessage) -> Result<()> {
         let (msg_type, payload) = match msg {
-            BackendMessage::HandshakeAck { features } => {
-                (2u32, features.to_le_bytes().to_vec())
-            }
-            BackendMessage::Irq { vector } => {
-                (4u32, vector.to_le_bytes().to_vec())
-            }
+            BackendMessage::HandshakeAck { features } => (2u32, features.to_le_bytes().to_vec()),
+            BackendMessage::Irq { vector } => (4u32, vector.to_le_bytes().to_vec()),
         };
 
         let header = MessageHeader {
@@ -271,9 +264,7 @@ impl PipeServer {
 
     /// Check if shutdown was signaled
     pub fn is_shutdown_signaled(&self) -> bool {
-        unsafe {
-            WaitForSingleObject(self.shutdown_event, 0) == WAIT_OBJECT_0
-        }
+        unsafe { WaitForSingleObject(self.shutdown_event, 0) == WAIT_OBJECT_0 }
     }
 
     /// Disconnect current client

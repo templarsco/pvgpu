@@ -40,24 +40,24 @@ unsafe impl Sync for SharedMemory {}
 impl SharedMemory {
     /// Open and map a shared memory region by name
     pub fn open(name: &str, expected_size: usize) -> Result<Self> {
-        info!("Opening shared memory: {} (size: {} bytes)", name, expected_size);
+        info!(
+            "Opening shared memory: {} (size: {} bytes)",
+            name, expected_size
+        );
 
         // Convert name to wide string
         let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
 
         // Open the file mapping object
-        let handle = unsafe {
-            OpenFileMappingW(FILE_MAP_ALL_ACCESS.0, false, PCWSTR(wide_name.as_ptr()))?
-        };
+        let handle =
+            unsafe { OpenFileMappingW(FILE_MAP_ALL_ACCESS.0, false, PCWSTR(wide_name.as_ptr()))? };
 
         if handle.is_invalid() {
             return Err(anyhow!("Failed to open file mapping: {}", name));
         }
 
         // Map the entire region
-        let view = unsafe {
-            MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, expected_size)
-        };
+        let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, expected_size) };
 
         if view.Value.is_null() {
             unsafe {
@@ -117,7 +117,7 @@ impl SharedMemory {
     }
 
     /// Get a mutable reference to the control region
-    /// 
+    ///
     /// # Safety
     /// Caller must ensure exclusive access
     pub unsafe fn control_region_mut(&self) -> &mut ControlRegion {
