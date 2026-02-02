@@ -231,6 +231,7 @@ jobs:
 
   # ============================================================================
   # Driver Skeleton Check (Windows)
+  # Note: Full driver build requires WDK which is not available in GitHub Actions
   # ============================================================================
   driver-check:
     name: Driver Structure Check
@@ -241,9 +242,39 @@ jobs:
       
       - name: Check driver directory structure
         run: |
-          if (Test-Path "driver/kmd") { Write-Host "KMD directory exists" }
-          if (Test-Path "driver/umd") { Write-Host "UMD directory exists" }
-          Write-Host "Driver skeleton structure verified"
+          Write-Host "Checking driver directory structure..."
+          
+          # Check KMD files
+          if (Test-Path "driver/kmd/pvgpu.c") { Write-Host "[OK] KMD source: pvgpu.c" } else { Write-Host "[MISSING] driver/kmd/pvgpu.c"; exit 1 }
+          if (Test-Path "driver/kmd/pvgpu.h") { Write-Host "[OK] KMD header: pvgpu.h" } else { Write-Host "[MISSING] driver/kmd/pvgpu.h"; exit 1 }
+          if (Test-Path "driver/kmd/pvgpu.inf") { Write-Host "[OK] KMD INF: pvgpu.inf" } else { Write-Host "[MISSING] driver/kmd/pvgpu.inf"; exit 1 }
+          if (Test-Path "driver/kmd/pvgpu.vcxproj") { Write-Host "[OK] KMD Project: pvgpu.vcxproj" } else { Write-Host "[MISSING] driver/kmd/pvgpu.vcxproj"; exit 1 }
+          
+          Write-Host ""
+          Write-Host "Driver skeleton structure verified successfully!"
+          Write-Host "Note: Full driver build requires Visual Studio 2022 + WDK"
+      
+      - name: Validate INF file syntax
+        run: |
+          Write-Host "Validating INF file..."
+          $inf = Get-Content "driver/kmd/pvgpu.inf" -Raw
+          
+          # Check required sections exist
+          $requiredSections = @("[Version]", "[Manufacturer]", "[SourceDisksFiles]", "[DestinationDirs]")
+          foreach ($section in $requiredSections) {
+            if ($inf -match [regex]::Escape($section)) {
+              Write-Host "[OK] Found section: $section"
+            } else {
+              Write-Host "[ERROR] Missing required section: $section"
+              exit 1
+            }
+          }
+          
+          # Check PCI IDs match protocol
+          if ($inf -match "VEN_1AF4") { Write-Host "[OK] Vendor ID matches protocol (0x1AF4)" }
+          if ($inf -match "DEV_10F0") { Write-Host "[OK] Device ID matches protocol (0x10F0)" }
+          
+          Write-Host "INF file validation passed!"
 
   # ============================================================================
   # Documentation

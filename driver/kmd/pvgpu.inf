@@ -1,0 +1,99 @@
+;
+; pvgpu.inf - PVGPU Paravirtualized GPU Driver Installation File
+;
+; Copyright (c) SANSI-GROUP. All rights reserved.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Display
+ClassGuid   = {4d36e968-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+CatalogFile = pvgpu.cat
+DriverVer   = 02/02/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir          = 13
+pvgpu_Device_CoInstaller_CopyFiles = 11
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+pvgpu.sys  = 1,,
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll = 1
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64
+
+[Standard.NTamd64]
+%pvgpu.DeviceDesc% = pvgpu_Device, PCI\VEN_1AF4&DEV_10F0
+%pvgpu.DeviceDesc% = pvgpu_Device, PCI\VEN_1AF4&DEV_10F0&SUBSYS_00000000
+%pvgpu.DeviceDesc% = pvgpu_Device, PCI\VEN_1AF4&DEV_10F0&REV_00
+
+[pvgpu_Device.NT]
+CopyFiles = Drivers_Dir
+FeatureScore = FC
+
+[Drivers_Dir]
+pvgpu.sys
+
+;-------------- Service installation
+[pvgpu_Device.NT.Services]
+AddService = pvgpu,%SPSVCINST_ASSOCSERVICE%, pvgpu_Service_Inst
+
+; -------------- pvgpu driver install sections
+[pvgpu_Service_Inst]
+DisplayName    = %pvgpu.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\pvgpu.sys
+LoadOrderGroup = Video
+
+;-------------- Coinstaller installation
+[pvgpu_Device.NT.CoInstallers]
+AddReg    = pvgpu_Device_CoInstaller_AddReg
+CopyFiles = pvgpu_Device_CoInstaller_CopyFiles
+
+[pvgpu_Device_CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
+
+[pvgpu_Device_CoInstaller_CopyFiles]
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
+
+[pvgpu_Device.NT.Wdf]
+KmdfService = pvgpu, pvgpu_wdfsect
+
+[pvgpu_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+;-------------- Hardware configuration
+[pvgpu_Device.NT.HW]
+AddReg = pvgpu_Device_HW_AddReg
+
+[pvgpu_Device_HW_AddReg]
+; Enable MSI-X
+HKR, "Interrupt Management", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 1
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLimit, 0x00010001, 4
+
+;-------------- Registry configuration for WDDM
+[pvgpu_Device.NT.AddReg]
+; Display adapter specific settings
+HKR,, "InstalledDisplayDrivers", %REG_MULTI_SZ%, "pvgpu_umd"
+HKR,, "UserModeDriverName", %REG_MULTI_SZ%, "pvgpu_umd.dll"
+HKR,, "UserModeDriverNameWow", %REG_MULTI_SZ%, "pvgpu_umd32.dll"
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName       = "SANSI-GROUP"
+DiskName               = "PVGPU Installation Disk"
+pvgpu.DeviceDesc       = "PVGPU Paravirtualized GPU Adapter"
+pvgpu.SVCDESC          = "PVGPU Display Driver Service"
+REG_MULTI_SZ           = 0x00010000
