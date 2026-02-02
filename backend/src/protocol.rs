@@ -371,6 +371,187 @@ pub struct CmdClearRenderTarget {
     pub color: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetVertexBuffer {
+    pub header: CommandHeader,
+    pub slot: u32,
+    pub buffer_id: u32,
+    pub stride: u32,
+    pub offset: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetIndexBuffer {
+    pub header: CommandHeader,
+    pub buffer_id: u32,
+    pub format: u32, // DXGI_FORMAT (16 = R16_UINT, 42 = R32_UINT)
+    pub offset: u32,
+    pub _reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetConstantBuffer {
+    pub header: CommandHeader,
+    pub stage: u32,       // ShaderStage enum
+    pub slot: u32,
+    pub buffer_id: u32,
+    pub _reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetInputLayout {
+    pub header: CommandHeader,
+    pub layout_id: u32,
+    pub _reserved: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetPrimitiveTopology {
+    pub header: CommandHeader,
+    pub topology: u32, // D3D11_PRIMITIVE_TOPOLOGY
+    pub _reserved: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetSampler {
+    pub header: CommandHeader,
+    pub stage: u32,
+    pub slot: u32,
+    pub sampler_id: u32,
+    pub _reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetShaderResource {
+    pub header: CommandHeader,
+    pub stage: u32,
+    pub slot: u32,
+    pub srv_id: u32,
+    pub _reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetBlendState {
+    pub header: CommandHeader,
+    pub state_id: u32,
+    pub blend_factor: [f32; 4],
+    pub sample_mask: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetRasterizerState {
+    pub header: CommandHeader,
+    pub state_id: u32,
+    pub _reserved: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetDepthStencil {
+    pub header: CommandHeader,
+    pub state_id: u32,
+    pub stencil_ref: u32,
+    pub _reserved: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ScissorRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetScissor {
+    pub header: CommandHeader,
+    pub num_rects: u32,
+    pub _reserved: [u32; 3],
+    pub rects: [ScissorRect; 16],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdDrawInstanced {
+    pub header: CommandHeader,
+    pub vertex_count: u32,
+    pub instance_count: u32,
+    pub start_vertex: u32,
+    pub start_instance: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdDrawIndexedInstanced {
+    pub header: CommandHeader,
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub start_index: u32,
+    pub base_vertex: i32,
+    pub start_instance: u32,
+    pub _reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdDispatch {
+    pub header: CommandHeader,
+    pub thread_group_count_x: u32,
+    pub thread_group_count_y: u32,
+    pub thread_group_count_z: u32,
+    pub _reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdClearDepthStencil {
+    pub header: CommandHeader,
+    pub dsv_id: u32,
+    pub clear_flags: u32, // D3D11_CLEAR_DEPTH = 1, D3D11_CLEAR_STENCIL = 2
+    pub depth: f32,
+    pub stencil: u8,
+    pub _padding: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdCopyResource {
+    pub header: CommandHeader,
+    pub dst_resource_id: u32,
+    pub src_resource_id: u32,
+    pub _reserved: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdUpdateResource {
+    pub header: CommandHeader,
+    pub resource_id: u32,
+    pub subresource: u32,
+    pub heap_offset: u32,
+    pub data_size: u32,
+    // Box for partial updates (optional, all zeros = full update)
+    pub dst_x: u32,
+    pub dst_y: u32,
+    pub dst_z: u32,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub row_pitch: u32,
+    pub depth_pitch: u32,
+}
+
 // =============================================================================
 // Helper Functions
 // =============================================================================

@@ -30,6 +30,7 @@ use crate::command_processor::CommandProcessor;
 use crate::config::Config;
 use crate::d3d11::D3D11Renderer;
 use crate::ipc::{BackendMessage, PipeServer, QemuMessage};
+use crate::presentation::{PresentationConfig, PresentationMode, PresentationPipeline};
 use crate::shmem::SharedMemory;
 
 pub use protocol::*;
@@ -39,8 +40,8 @@ struct BackendService {
     config: Config,
     pipe_server: Option<PipeServer>,
     shared_memory: Option<SharedMemory>,
-    renderer: Option<D3D11Renderer>,
     command_processor: Option<CommandProcessor>,
+    presentation: Option<PresentationPipeline>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -50,8 +51,8 @@ impl BackendService {
             config,
             pipe_server: None,
             shared_memory: None,
-            renderer: None,
             command_processor: None,
+            presentation: None,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -103,37 +104,44 @@ impl BackendService {
         }
     }
 
-    /// Initialize D3D11 renderer
+    /// Initialize D3D11 renderer and presentation pipeline
     fn init_renderer(&mut self) -> Result<()> {
         info!("Initializing D3D11 renderer...");
         let renderer = D3D11Renderer::new(Some(self.config.adapter_index))?;
-        let processor = CommandProcessor::new(renderer);
 
-        // Store a new renderer for the service (processor takes ownership of one)
-        self.renderer = Some(D3D11Renderer::new(Some(self.config.adapter_index))?);
+        // Get device and context for presentation pipeline before moving renderer
+        let device = renderer.device().clone();
+        let context = renderer.context().clone();
+
+        // Create command processor with the renderer
+        let processor = CommandProcessor::new(renderer);
         self.command_processor = Some(processor);
 
-        info!("D3D11 renderer initialized");
+        // Initialize presentation pipeline
+        let presentation_config = PresentationConfig {
+            mode: PresentationMode::Windowed, // TODO: Make configurable
+            width: 1920,                       // TODO: Get from config
+            height: 1080,                      // TODO: Get from config
+            vsync: true,
+            window_title: "PVGPU Output".to_string(),
+            frame_event_name: Some("Global\\PVGPU_FrameEvent".to_string()),
+        };
+
+        info!("Initializing presentation pipeline...");
+        let presentation = PresentationPipeline::new(device, context, presentation_config)?;
+
+        if let Some(handle) = presentation.shared_handle() {
+            info!("Shared texture handle: {:?}", handle);
+        }
+
+        self.presentation = Some(presentation);
+
+        info!("D3D11 renderer and presentation pipeline initialized");
         Ok(())
     }
 
     /// Main processing loop
     fn run_loop(&mut self) -> Result<()> {
-        let shmem = self
-            .shared_memory
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Shared memory not initialized"))?;
-
-        let processor = self
-            .command_processor
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Command processor not initialized"))?;
-
-        let server = self
-            .pipe_server
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Pipe server not initialized"))?;
-
         info!("Entering main processing loop...");
 
         loop {
@@ -143,37 +151,87 @@ impl BackendService {
                 break;
             }
 
-            // Process pending commands from ring buffer
-            let mut processed = 0u64;
-            while let Some((data, _pending)) = shmem.read_pending_commands() {
-                if data.is_empty() {
+            // Process window messages if we have a presentation pipeline
+            if let Some(ref mut presentation) = self.presentation {
+                if !presentation.process_messages() {
+                    info!("Window closed, shutting down...");
                     break;
                 }
+            }
 
-                match processor.process_command(data) {
-                    Ok(consumed) => {
-                        shmem.advance_consumer(consumed as u64);
-                        processed += consumed as u64;
+            // Process pending commands from ring buffer
+            let mut processed = 0u64;
+            let mut pending_present: Option<(u32, u32)> = None;
 
-                        // Update fence if needed
-                        let fence = processor.current_fence();
-                        if fence > 0 {
-                            shmem.complete_fence(fence);
-                            // Request IRQ to notify guest
-                            if let Err(e) = server.send_message(BackendMessage::Irq { vector: 0 }) {
-                                warn!("Failed to send IRQ: {}", e);
+            // Scope for mutable borrows of processor and shmem
+            {
+                let shmem = match self.shared_memory.as_ref() {
+                    Some(s) => s,
+                    None => return Err(anyhow::anyhow!("Shared memory not initialized")),
+                };
+
+                let processor = match self.command_processor.as_mut() {
+                    Some(p) => p,
+                    None => return Err(anyhow::anyhow!("Command processor not initialized")),
+                };
+
+                let server = match self.pipe_server.as_ref() {
+                    Some(s) => s,
+                    None => return Err(anyhow::anyhow!("Pipe server not initialized")),
+                };
+
+                while let Some((data, _pending_count)) = shmem.read_pending_commands() {
+                    if data.is_empty() {
+                        break;
+                    }
+
+                    match processor.process_command(data) {
+                        Ok(consumed) => {
+                            shmem.advance_consumer(consumed as u64);
+                            processed += consumed as u64;
+
+                            // Update fence if needed
+                            let fence = processor.current_fence();
+                            if fence > 0 {
+                                shmem.complete_fence(fence);
+                                // Request IRQ to notify guest
+                                if let Err(e) = server.send_message(BackendMessage::Irq { vector: 0 }) {
+                                    warn!("Failed to send IRQ: {}", e);
+                                }
+                            }
+
+                            // Check for pending present
+                            if let Some(present_info) = processor.take_pending_present() {
+                                pending_present = Some(present_info);
                             }
                         }
+                        Err(e) => {
+                            error!("Error processing command: {}", e);
+                            break;
+                        }
                     }
-                    Err(e) => {
-                        error!("Error processing command: {}", e);
+
+                    // Don't process too many commands in one batch
+                    if processed > 1024 * 1024 {
                         break;
                     }
                 }
+            }
 
-                // Don't process too many commands in one batch
-                if processed > 1024 * 1024 {
-                    break;
+            // Handle presentation outside the borrow scope
+            if let Some((backbuffer_id, _sync_interval)) = pending_present {
+                if let (Some(presentation), Some(processor)) = (
+                    self.presentation.as_mut(),
+                    self.command_processor.as_ref(),
+                ) {
+                    // Get the texture from the renderer
+                    if let Some(texture) = processor.renderer().get_texture(backbuffer_id) {
+                        if let Err(e) = presentation.present(texture) {
+                            error!("Presentation failed: {}", e);
+                        }
+                    } else {
+                        warn!("Present: backbuffer {} not found", backbuffer_id);
+                    }
                 }
             }
 
@@ -185,9 +243,6 @@ impl BackendService {
             // No commands available, wait for doorbell or timeout
             // TODO: Implement proper event-based waiting
             std::thread::sleep(Duration::from_micros(100));
-
-            // Check for messages from QEMU (non-blocking would be better)
-            // For now, we'll poll periodically
         }
 
         Ok(())
