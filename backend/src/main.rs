@@ -120,8 +120,8 @@ impl BackendService {
         // Initialize presentation pipeline
         let presentation_config = PresentationConfig {
             mode: PresentationMode::Windowed, // TODO: Make configurable
-            width: 1920,                       // TODO: Get from config
-            height: 1080,                      // TODO: Get from config
+            width: 1920,                      // TODO: Get from config
+            height: 1080,                     // TODO: Get from config
             vsync: true,
             window_title: "PVGPU Output".to_string(),
             frame_event_name: Some("Global\\PVGPU_FrameEvent".to_string()),
@@ -195,7 +195,9 @@ impl BackendService {
                             if fence > 0 {
                                 shmem.complete_fence(fence);
                                 // Request IRQ to notify guest
-                                if let Err(e) = server.send_message(BackendMessage::Irq { vector: 0 }) {
+                                if let Err(e) =
+                                    server.send_message(BackendMessage::Irq { vector: 0 })
+                                {
                                     warn!("Failed to send IRQ: {}", e);
                                 }
                             }
@@ -220,10 +222,9 @@ impl BackendService {
 
             // Handle presentation outside the borrow scope
             if let Some((backbuffer_id, _sync_interval)) = pending_present {
-                if let (Some(presentation), Some(processor)) = (
-                    self.presentation.as_mut(),
-                    self.command_processor.as_ref(),
-                ) {
+                if let (Some(presentation), Some(processor)) =
+                    (self.presentation.as_mut(), self.command_processor.as_ref())
+                {
                     // Get the texture from the renderer
                     if let Some(texture) = processor.renderer().get_texture(backbuffer_id) {
                         if let Err(e) = presentation.present(texture) {

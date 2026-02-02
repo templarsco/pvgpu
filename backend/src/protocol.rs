@@ -395,7 +395,7 @@ pub struct CmdSetIndexBuffer {
 #[derive(Debug, Clone, Copy)]
 pub struct CmdSetConstantBuffer {
     pub header: CommandHeader,
-    pub stage: u32,       // ShaderStage enum
+    pub stage: u32, // ShaderStage enum
     pub slot: u32,
     pub buffer_id: u32,
     pub _reserved: u32,

@@ -573,11 +573,22 @@ impl D3D11Renderer {
     // =========================================================================
 
     /// Set a vertex buffer to an input slot
-    pub fn set_vertex_buffer(&mut self, slot: u32, buffer_id: ResourceId, stride: u32, offset: u32) {
+    pub fn set_vertex_buffer(
+        &mut self,
+        slot: u32,
+        buffer_id: ResourceId,
+        stride: u32,
+        offset: u32,
+    ) {
         if buffer_id == 0 {
             // Unbind
             unsafe {
-                self.context.IASetVertexBuffers(slot, Some(&[None]), Some(&[stride]), Some(&[offset]));
+                self.context.IASetVertexBuffers(
+                    slot,
+                    Some(&[None]),
+                    Some(&[stride]),
+                    Some(&[offset]),
+                );
             }
             return;
         }
@@ -888,12 +899,8 @@ impl D3D11Renderer {
             vertex_count, instance_count
         );
         unsafe {
-            self.context.DrawInstanced(
-                vertex_count,
-                instance_count,
-                start_vertex,
-                start_instance,
-            );
+            self.context
+                .DrawInstanced(vertex_count, instance_count, start_vertex, start_instance);
         }
     }
 
@@ -952,7 +959,8 @@ impl D3D11Renderer {
                 } else {
                     Default::default()
                 };
-                self.context.ClearDepthStencilView(dsv, flags, depth, stencil);
+                self.context
+                    .ClearDepthStencilView(dsv, flags, depth, stencil);
             }
         } else {
             warn!("ClearDepthStencil: Invalid DSV ID {}", dsv_id);
@@ -962,22 +970,14 @@ impl D3D11Renderer {
     /// Copy entire resource
     pub fn copy_resource(&mut self, dst_id: ResourceId, src_id: ResourceId) {
         let src_resource = match self.resources.get(&src_id) {
-            Some(D3D11Resource::Texture2D { texture, .. }) => {
-                Some(texture.clone().cast().ok())
-            }
-            Some(D3D11Resource::Buffer { buffer, .. }) => {
-                Some(buffer.clone().cast().ok())
-            }
+            Some(D3D11Resource::Texture2D { texture, .. }) => Some(texture.clone().cast().ok()),
+            Some(D3D11Resource::Buffer { buffer, .. }) => Some(buffer.clone().cast().ok()),
             _ => None,
         };
 
         let dst_resource = match self.resources.get(&dst_id) {
-            Some(D3D11Resource::Texture2D { texture, .. }) => {
-                Some(texture.clone().cast().ok())
-            }
-            Some(D3D11Resource::Buffer { buffer, .. }) => {
-                Some(buffer.clone().cast().ok())
-            }
+            Some(D3D11Resource::Texture2D { texture, .. }) => Some(texture.clone().cast().ok()),
+            Some(D3D11Resource::Buffer { buffer, .. }) => Some(buffer.clone().cast().ok()),
             _ => None,
         };
 

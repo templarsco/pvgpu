@@ -231,8 +231,7 @@ impl PresentationPipeline {
         info!("Creating swapchain for window");
 
         // Get DXGI device and factory
-        let dxgi_device: windows::Win32::Graphics::Dxgi::IDXGIDevice =
-            self.device.cast()?;
+        let dxgi_device: windows::Win32::Graphics::Dxgi::IDXGIDevice = self.device.cast()?;
         let dxgi_adapter = unsafe { dxgi_device.GetAdapter()? };
         let dxgi_factory: IDXGIFactory2 = unsafe { dxgi_adapter.GetParent()? };
 
@@ -335,7 +334,7 @@ impl PresentationPipeline {
     }
 
     /// Present a frame from the renderer's texture.
-    /// 
+    ///
     /// This copies the source texture to the swapchain backbuffer and/or shared texture,
     /// then presents and signals the frame event.
     pub fn present(&mut self, source_texture: &ID3D11Texture2D) -> Result<()> {
@@ -396,8 +395,16 @@ impl PresentationPipeline {
             let backbuffer: ID3D11Texture2D = unsafe { swapchain.GetBuffer(0)? };
 
             unsafe {
-                self.context
-                    .CopySubresourceRegion(&backbuffer, 0, 0, 0, 0, source_texture, 0, Some(&src_box));
+                self.context.CopySubresourceRegion(
+                    &backbuffer,
+                    0,
+                    0,
+                    0,
+                    0,
+                    source_texture,
+                    0,
+                    Some(&src_box),
+                );
             }
 
             // Present with vsync
@@ -410,8 +417,16 @@ impl PresentationPipeline {
         // Copy to shared texture if in headless/dual mode
         if let Some(ref shared_texture) = self.shared_texture {
             unsafe {
-                self.context
-                    .CopySubresourceRegion(shared_texture, 0, 0, 0, 0, source_texture, 0, Some(&src_box));
+                self.context.CopySubresourceRegion(
+                    shared_texture,
+                    0,
+                    0,
+                    0,
+                    0,
+                    source_texture,
+                    0,
+                    Some(&src_box),
+                );
             }
         }
 
@@ -442,13 +457,7 @@ impl PresentationPipeline {
         // Resize swapchain if exists
         if let Some(ref swapchain) = self.swapchain {
             unsafe {
-                swapchain.ResizeBuffers(
-                    2,
-                    width,
-                    height,
-                    DXGI_FORMAT_R8G8B8A8_UNORM,
-                    0,
-                )?;
+                swapchain.ResizeBuffers(2, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0)?;
             }
 
             // Recreate RTV
