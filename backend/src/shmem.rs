@@ -116,7 +116,7 @@ impl SharedMemory {
     ///
     /// # Safety
     /// Caller must ensure exclusive access
-    pub unsafe fn control_region_mut(&self) -> &mut ControlRegion {
+    pub unsafe fn control_region_mut(&mut self) -> &mut ControlRegion {
         &mut *(self.base_addr as *mut ControlRegion)
     }
 
@@ -134,7 +134,7 @@ impl SharedMemory {
     ///
     /// # Safety
     /// Caller must ensure proper synchronization
-    pub unsafe fn command_ring_mut(&self) -> &mut [u8] {
+    pub unsafe fn command_ring_mut(&mut self) -> &mut [u8] {
         let control = self.control_region();
         let offset = control.ring_offset as usize;
         let size = control.ring_size as usize;
@@ -156,7 +156,7 @@ impl SharedMemory {
     ///
     /// # Safety
     /// Caller must ensure proper synchronization
-    pub unsafe fn resource_heap_mut(&self) -> &mut [u8] {
+    pub unsafe fn resource_heap_mut(&mut self) -> &mut [u8] {
         let control = self.control_region();
         let offset = control.heap_offset as usize;
         let size = control.heap_size as usize;
