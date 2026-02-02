@@ -251,6 +251,14 @@ jobs:
           if (Test-Path "driver/kmd/pvgpu.vcxproj") { Write-Host "[OK] KMD Project: pvgpu.vcxproj" } else { Write-Host "[MISSING] driver/kmd/pvgpu.vcxproj"; exit 1 }
           
           Write-Host ""
+          
+          # Check UMD files
+          if (Test-Path "driver/umd/pvgpu_umd.c") { Write-Host "[OK] UMD source: pvgpu_umd.c" } else { Write-Host "[MISSING] driver/umd/pvgpu_umd.c"; exit 1 }
+          if (Test-Path "driver/umd/pvgpu_umd.h") { Write-Host "[OK] UMD header: pvgpu_umd.h" } else { Write-Host "[MISSING] driver/umd/pvgpu_umd.h"; exit 1 }
+          if (Test-Path "driver/umd/pvgpu_umd.def") { Write-Host "[OK] UMD DEF: pvgpu_umd.def" } else { Write-Host "[MISSING] driver/umd/pvgpu_umd.def"; exit 1 }
+          if (Test-Path "driver/umd/pvgpu_umd.vcxproj") { Write-Host "[OK] UMD Project: pvgpu_umd.vcxproj" } else { Write-Host "[MISSING] driver/umd/pvgpu_umd.vcxproj"; exit 1 }
+          
+          Write-Host ""
           Write-Host "Driver skeleton structure verified successfully!"
           Write-Host "Note: Full driver build requires Visual Studio 2022 + WDK"
       

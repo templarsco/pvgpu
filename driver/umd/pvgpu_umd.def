@@ -1,0 +1,9 @@
+; pvgpu_umd.def - Module Definition File for PVGPU User-Mode Driver
+;
+; Copyright (c) SANSI-GROUP. All rights reserved.
+; SPDX-License-Identifier: MIT OR Apache-2.0
+
+LIBRARY pvgpu_umd
+
+EXPORTS
+    OpenAdapter10_2
