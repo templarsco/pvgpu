@@ -850,9 +850,24 @@ void APIENTRY PvgpuIaSetInputLayout(
     _In_ D3D10DDI_HDEVICE hDevice,
     _In_ D3D10DDI_HELEMENTLAYOUT hInputLayout)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hInputLayout);
-    /* TODO: Track and submit input layout binding */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pLayout;
+    PvgpuCommandHeader cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pLayout = (PVGPU_UMD_RESOURCE*)hInputLayout.pDrvPrivate;
+    
+    /* Track current input layout */
+    pDevice->PipelineState.InputLayout = pLayout ? pLayout->HostHandle : 0;
+    
+    /* Build and submit command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.command_type = PVGPU_CMD_SET_INPUT_LAYOUT;
+    cmd.command_size = sizeof(cmd);
+    cmd.resource_id = pDevice->PipelineState.InputLayout;
+    cmd.flags = 0;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_INPUT_LAYOUT, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuIaSetVertexBuffers(
@@ -863,13 +878,39 @@ void APIENTRY PvgpuIaSetVertexBuffers(
     _In_reads_(NumBuffers) CONST UINT* pStrides,
     _In_reads_(NumBuffers) CONST UINT* pOffsets)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(StartBuffer);
-    UNREFERENCED_PARAMETER(NumBuffers);
-    UNREFERENCED_PARAMETER(phBuffers);
-    UNREFERENCED_PARAMETER(pStrides);
-    UNREFERENCED_PARAMETER(pOffsets);
-    /* TODO: Track and submit vertex buffer bindings */
+    PVGPU_UMD_DEVICE* pDevice;
+    PvgpuCmdSetVertexBuffer cmd;
+    UINT i;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    
+    /* Limit to maximum supported */
+    if (NumBuffers > 16) NumBuffers = 16;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_VERTEX_BUFFER;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.start_slot = StartBuffer;
+    cmd.num_buffers = NumBuffers;
+    
+    for (i = 0; i < NumBuffers; i++)
+    {
+        PVGPU_UMD_RESOURCE* pBuffer = (PVGPU_UMD_RESOURCE*)phBuffers[i].pDrvPrivate;
+        cmd.buffers[i].buffer_id = pBuffer ? pBuffer->HostHandle : 0;
+        cmd.buffers[i].stride = pStrides[i];
+        cmd.buffers[i].offset = pOffsets[i];
+        
+        /* Track in device state */
+        if (StartBuffer + i < PVGPU_UMD_MAX_VERTEX_BUFFERS)
+        {
+            pDevice->PipelineState.VertexBuffers[StartBuffer + i] = cmd.buffers[i].buffer_id;
+            pDevice->PipelineState.VertexBufferStrides[StartBuffer + i] = pStrides[i];
+            pDevice->PipelineState.VertexBufferOffsets[StartBuffer + i] = pOffsets[i];
+        }
+    }
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_VERTEX_BUFFER, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuIaSetIndexBuffer(
@@ -878,47 +919,120 @@ void APIENTRY PvgpuIaSetIndexBuffer(
     _In_ DXGI_FORMAT Format,
     _In_ UINT Offset)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hBuffer);
-    UNREFERENCED_PARAMETER(Format);
-    UNREFERENCED_PARAMETER(Offset);
-    /* TODO: Track and submit index buffer binding */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pBuffer;
+    PvgpuCmdSetIndexBuffer cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pBuffer = (PVGPU_UMD_RESOURCE*)hBuffer.pDrvPrivate;
+    
+    /* Track in device state */
+    pDevice->PipelineState.IndexBuffer = pBuffer ? pBuffer->HostHandle : 0;
+    pDevice->PipelineState.IndexBufferFormat = Format;
+    pDevice->PipelineState.IndexBufferOffset = Offset;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_INDEX_BUFFER;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.buffer_id = pDevice->PipelineState.IndexBuffer;
+    cmd.format = Format;
+    cmd.offset = Offset;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_INDEX_BUFFER, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuIaSetTopology(
     _In_ D3D10DDI_HDEVICE hDevice,
     _In_ D3D10_DDI_PRIMITIVE_TOPOLOGY PrimitiveTopology)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(PrimitiveTopology);
-    /* TODO: Track and submit topology */
+    PVGPU_UMD_DEVICE* pDevice;
+    PvgpuCmdSetPrimitiveTopology cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    
+    /* Track in device state */
+    pDevice->PipelineState.PrimitiveTopology = (UINT32)PrimitiveTopology;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_PRIMITIVE_TOPOLOGY;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.topology = (uint32_t)PrimitiveTopology;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_PRIMITIVE_TOPOLOGY, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuVsSetShader(
     _In_ D3D10DDI_HDEVICE hDevice,
     _In_ D3D10DDI_HSHADER hShader)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hShader);
-    /* TODO: Track and submit VS binding */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_SHADER* pShader;
+    PvgpuCmdSetShader cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pShader = (PVGPU_UMD_SHADER*)hShader.pDrvPrivate;
+    
+    /* Track in device state */
+    pDevice->PipelineState.VertexShader = pShader ? pShader->HostHandle : 0;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_SHADER;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.stage = PVGPU_STAGE_VERTEX;
+    cmd.shader_id = pDevice->PipelineState.VertexShader;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_SHADER, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuPsSetShader(
     _In_ D3D10DDI_HDEVICE hDevice,
     _In_ D3D10DDI_HSHADER hShader)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hShader);
-    /* TODO: Track and submit PS binding */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_SHADER* pShader;
+    PvgpuCmdSetShader cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pShader = (PVGPU_UMD_SHADER*)hShader.pDrvPrivate;
+    
+    /* Track in device state */
+    pDevice->PipelineState.PixelShader = pShader ? pShader->HostHandle : 0;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_SHADER;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.stage = PVGPU_STAGE_PIXEL;
+    cmd.shader_id = pDevice->PipelineState.PixelShader;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_SHADER, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuGsSetShader(
     _In_ D3D10DDI_HDEVICE hDevice,
     _In_ D3D10DDI_HSHADER hShader)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hShader);
-    /* TODO: Track and submit GS binding */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_SHADER* pShader;
+    PvgpuCmdSetShader cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pShader = (PVGPU_UMD_SHADER*)hShader.pDrvPrivate;
+    
+    /* Track in device state */
+    pDevice->PipelineState.GeometryShader = pShader ? pShader->HostHandle : 0;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_SHADER;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.stage = PVGPU_STAGE_GEOMETRY;
+    cmd.shader_id = pDevice->PipelineState.GeometryShader;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_SHADER, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuSetRenderTargets(
@@ -928,12 +1042,39 @@ void APIENTRY PvgpuSetRenderTargets(
     _In_ UINT ClearSlots,
     _In_ D3D10DDI_HDEPTHSTENCILVIEW hDepthStencilView)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(phRenderTargetView);
-    UNREFERENCED_PARAMETER(NumViews);
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pDSV;
+    PvgpuCmdSetRenderTarget cmd;
+    UINT i;
+    
     UNREFERENCED_PARAMETER(ClearSlots);
-    UNREFERENCED_PARAMETER(hDepthStencilView);
-    /* TODO: Track and submit render target bindings */
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pDSV = (PVGPU_UMD_RESOURCE*)hDepthStencilView.pDrvPrivate;
+    
+    /* Limit to maximum supported */
+    if (NumViews > 8) NumViews = 8;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_RENDER_TARGET;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.num_rtvs = NumViews;
+    cmd.dsv_id = pDSV ? pDSV->HostHandle : 0;
+    
+    for (i = 0; i < NumViews; i++)
+    {
+        PVGPU_UMD_RESOURCE* pRTV = (PVGPU_UMD_RESOURCE*)phRenderTargetView[i].pDrvPrivate;
+        cmd.rtv_ids[i] = pRTV ? pRTV->HostHandle : 0;
+        
+        /* Track in device state */
+        pDevice->PipelineState.RenderTargets[i] = cmd.rtv_ids[i];
+    }
+    
+    pDevice->PipelineState.RenderTargetCount = NumViews;
+    pDevice->PipelineState.DepthStencilView = cmd.dsv_id;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_RENDER_TARGET, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuSetViewports(
@@ -942,11 +1083,36 @@ void APIENTRY PvgpuSetViewports(
     _In_ UINT ClearViewports,
     _In_reads_(NumViewports) CONST D3D10_DDI_VIEWPORT* pViewports)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(NumViewports);
+    PVGPU_UMD_DEVICE* pDevice;
+    PvgpuCmdSetViewport cmd;
+    UINT i;
+    
     UNREFERENCED_PARAMETER(ClearViewports);
-    UNREFERENCED_PARAMETER(pViewports);
-    /* TODO: Track and submit viewports */
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    
+    /* Limit to maximum supported */
+    if (NumViewports > 16) NumViewports = 16;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_VIEWPORT;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.num_viewports = NumViewports;
+    
+    for (i = 0; i < NumViewports; i++)
+    {
+        cmd.viewports[i].x = pViewports[i].TopLeftX;
+        cmd.viewports[i].y = pViewports[i].TopLeftY;
+        cmd.viewports[i].width = pViewports[i].Width;
+        cmd.viewports[i].height = pViewports[i].Height;
+        cmd.viewports[i].min_depth = pViewports[i].MinDepth;
+        cmd.viewports[i].max_depth = pViewports[i].MaxDepth;
+    }
+    
+    pDevice->PipelineState.ViewportCount = NumViewports;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_VIEWPORT, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuSetScissorRects(
@@ -955,11 +1121,34 @@ void APIENTRY PvgpuSetScissorRects(
     _In_ UINT ClearRects,
     _In_reads_(NumRects) CONST D3D10_DDI_RECT* pRects)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(NumRects);
+    PVGPU_UMD_DEVICE* pDevice;
+    PvgpuCmdSetScissor cmd;
+    UINT i;
+    
     UNREFERENCED_PARAMETER(ClearRects);
-    UNREFERENCED_PARAMETER(pRects);
-    /* TODO: Track and submit scissor rects */
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    
+    /* Limit to maximum supported */
+    if (NumRects > 16) NumRects = 16;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_SCISSOR;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.num_rects = NumRects;
+    
+    for (i = 0; i < NumRects; i++)
+    {
+        cmd.rects[i].left = pRects[i].left;
+        cmd.rects[i].top = pRects[i].top;
+        cmd.rects[i].right = pRects[i].right;
+        cmd.rects[i].bottom = pRects[i].bottom;
+    }
+    
+    pDevice->PipelineState.ScissorRectCount = NumRects;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_SCISSOR, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuSetBlendState(
@@ -968,11 +1157,33 @@ void APIENTRY PvgpuSetBlendState(
     _In_reads_(4) CONST FLOAT BlendFactor[4],
     _In_ UINT SampleMask)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hBlendState);
-    UNREFERENCED_PARAMETER(BlendFactor);
-    UNREFERENCED_PARAMETER(SampleMask);
-    /* TODO: Track and submit blend state */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pBlendState;
+    PvgpuCmdSetBlendState cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pBlendState = (PVGPU_UMD_RESOURCE*)hBlendState.pDrvPrivate;
+    
+    /* Track in device state */
+    pDevice->PipelineState.BlendState = pBlendState ? pBlendState->HostHandle : 0;
+    pDevice->PipelineState.BlendFactor[0] = BlendFactor[0];
+    pDevice->PipelineState.BlendFactor[1] = BlendFactor[1];
+    pDevice->PipelineState.BlendFactor[2] = BlendFactor[2];
+    pDevice->PipelineState.BlendFactor[3] = BlendFactor[3];
+    pDevice->PipelineState.SampleMask = SampleMask;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_BLEND_STATE;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.blend_state_id = pDevice->PipelineState.BlendState;
+    cmd.blend_factor[0] = BlendFactor[0];
+    cmd.blend_factor[1] = BlendFactor[1];
+    cmd.blend_factor[2] = BlendFactor[2];
+    cmd.blend_factor[3] = BlendFactor[3];
+    cmd.sample_mask = SampleMask;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_BLEND_STATE, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuSetDepthStencilState(
@@ -980,23 +1191,52 @@ void APIENTRY PvgpuSetDepthStencilState(
     _In_ D3D10DDI_HDEPTHSTENCILSTATE hDepthStencilState,
     _In_ UINT StencilRef)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hDepthStencilState);
-    UNREFERENCED_PARAMETER(StencilRef);
-    /* TODO: Track and submit depth stencil state */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pDSState;
+    PvgpuCmdSetDepthStencilState cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pDSState = (PVGPU_UMD_RESOURCE*)hDepthStencilState.pDrvPrivate;
+    
+    /* Track in device state */
+    pDevice->PipelineState.DepthStencilState = pDSState ? pDSState->HostHandle : 0;
+    pDevice->PipelineState.StencilRef = StencilRef;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_DEPTH_STENCIL;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.depth_stencil_state_id = pDevice->PipelineState.DepthStencilState;
+    cmd.stencil_ref = StencilRef;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_DEPTH_STENCIL, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuSetRasterizerState(
     _In_ D3D10DDI_HDEVICE hDevice,
     _In_ D3D10DDI_HRASTERIZERSTATE hRasterizerState)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hRasterizerState);
-    /* TODO: Track and submit rasterizer state */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pRSState;
+    PvgpuCmdSetRasterizerState cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pRSState = (PVGPU_UMD_RESOURCE*)hRasterizerState.pDrvPrivate;
+    
+    /* Track in device state */
+    pDevice->PipelineState.RasterizerState = pRSState ? pRSState->HostHandle : 0;
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_SET_RASTERIZER_STATE;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.rasterizer_state_id = pDevice->PipelineState.RasterizerState;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_SET_RASTERIZER_STATE, &cmd, sizeof(cmd));
 }
 
 /* ============================================================================
- * Resource Operations (Stubs)
+ * Resource Operations
  * ============================================================================ */
 
 void APIENTRY PvgpuResourceCopy(
@@ -1004,10 +1244,28 @@ void APIENTRY PvgpuResourceCopy(
     _In_ D3D10DDI_HRESOURCE hDstResource,
     _In_ D3D10DDI_HRESOURCE hSrcResource)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hDstResource);
-    UNREFERENCED_PARAMETER(hSrcResource);
-    /* TODO: Implement resource copy */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pDst;
+    PVGPU_UMD_RESOURCE* pSrc;
+    PvgpuCmdCopyResource cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pDst = (PVGPU_UMD_RESOURCE*)hDstResource.pDrvPrivate;
+    pSrc = (PVGPU_UMD_RESOURCE*)hSrcResource.pDrvPrivate;
+    
+    if (pDst == NULL || pSrc == NULL)
+    {
+        return;
+    }
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_COPY_RESOURCE;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.dst_resource_id = pDst->HostHandle;
+    cmd.src_resource_id = pSrc->HostHandle;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_COPY_RESOURCE, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuResourceCopyRegion(
@@ -1021,16 +1279,49 @@ void APIENTRY PvgpuResourceCopyRegion(
     _In_ UINT SrcSubresource,
     _In_opt_ CONST D3D10_DDI_BOX* pSrcBox)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hDstResource);
-    UNREFERENCED_PARAMETER(DstSubresource);
-    UNREFERENCED_PARAMETER(DstX);
-    UNREFERENCED_PARAMETER(DstY);
-    UNREFERENCED_PARAMETER(DstZ);
-    UNREFERENCED_PARAMETER(hSrcResource);
-    UNREFERENCED_PARAMETER(SrcSubresource);
-    UNREFERENCED_PARAMETER(pSrcBox);
-    /* TODO: Implement region copy */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pDst;
+    PVGPU_UMD_RESOURCE* pSrc;
+    PvgpuCmdCopyResourceRegion cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pDst = (PVGPU_UMD_RESOURCE*)hDstResource.pDrvPrivate;
+    pSrc = (PVGPU_UMD_RESOURCE*)hSrcResource.pDrvPrivate;
+    
+    if (pDst == NULL || pSrc == NULL)
+    {
+        return;
+    }
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_COPY_RESOURCE;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.dst_resource_id = pDst->HostHandle;
+    cmd.dst_subresource = DstSubresource;
+    cmd.dst_x = DstX;
+    cmd.dst_y = DstY;
+    cmd.dst_z = DstZ;
+    cmd.src_resource_id = pSrc->HostHandle;
+    cmd.src_subresource = SrcSubresource;
+    
+    /* Copy source box if provided */
+    if (pSrcBox != NULL)
+    {
+        cmd.has_src_box = 1;
+        cmd.src_box.left = pSrcBox->left;
+        cmd.src_box.top = pSrcBox->top;
+        cmd.src_box.front = pSrcBox->front;
+        cmd.src_box.right = pSrcBox->right;
+        cmd.src_box.bottom = pSrcBox->bottom;
+        cmd.src_box.back = pSrcBox->back;
+    }
+    else
+    {
+        cmd.has_src_box = 0;
+    }
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_COPY_RESOURCE, &cmd, sizeof(cmd));
 }
 
 void APIENTRY PvgpuResourceUpdateSubresourceUP(
@@ -1042,14 +1333,62 @@ void APIENTRY PvgpuResourceUpdateSubresourceUP(
     _In_ UINT RowPitch,
     _In_ UINT DepthPitch)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hDstResource);
-    UNREFERENCED_PARAMETER(DstSubresource);
-    UNREFERENCED_PARAMETER(pDstBox);
-    UNREFERENCED_PARAMETER(pSysMemUP);
-    UNREFERENCED_PARAMETER(RowPitch);
-    UNREFERENCED_PARAMETER(DepthPitch);
-    /* TODO: Implement update subresource */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pDst;
+    PvgpuCmdUpdateResource cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pDst = (PVGPU_UMD_RESOURCE*)hDstResource.pDrvPrivate;
+    
+    if (pDst == NULL || pSysMemUP == NULL)
+    {
+        return;
+    }
+    
+    /* Build command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_UPDATE_RESOURCE;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.header.resource_id = pDst->HostHandle;
+    cmd.subresource = DstSubresource;
+    cmd.row_pitch = RowPitch;
+    cmd.depth_pitch = DepthPitch;
+    
+    /* Set destination region if box is provided */
+    if (pDstBox != NULL)
+    {
+        cmd.dst_x = pDstBox->left;
+        cmd.dst_y = pDstBox->top;
+        cmd.dst_z = pDstBox->front;
+        cmd.width = pDstBox->right - pDstBox->left;
+        cmd.height = pDstBox->bottom - pDstBox->top;
+        cmd.depth = pDstBox->back - pDstBox->front;
+    }
+    else
+    {
+        /* Full resource update */
+        cmd.dst_x = 0;
+        cmd.dst_y = 0;
+        cmd.dst_z = 0;
+        cmd.width = pDst->Width;
+        cmd.height = pDst->Height;
+        cmd.depth = pDst->Depth > 0 ? pDst->Depth : 1;
+    }
+    
+    /*
+     * NOTE: The actual data copy to shared memory would happen here.
+     * For now, we set heap_offset to 0 as a placeholder.
+     * In a full implementation:
+     * 1. Allocate space in the resource heap
+     * 2. Copy pSysMemUP data to heap at that offset
+     * 3. Set cmd.heap_offset to that location
+     */
+    cmd.heap_offset = 0; /* TODO: Implement shared memory data transfer */
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_UPDATE_RESOURCE, &cmd, sizeof(cmd));
+    
+    PVGPU_TRACE("UpdateSubresourceUP: resource %u subres %u",
+        pDst->HostHandle, DstSubresource);
 }
 
 void APIENTRY PvgpuResourceMap(
@@ -1060,13 +1399,59 @@ void APIENTRY PvgpuResourceMap(
     _In_ UINT MapFlags,
     _Out_ D3D10DDI_MAPPED_SUBRESOURCE* pMappedSubresource)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hResource);
-    UNREFERENCED_PARAMETER(Subresource);
-    UNREFERENCED_PARAMETER(MapType);
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pResource;
+    PvgpuCmdMapResource cmd;
+    
     UNREFERENCED_PARAMETER(MapFlags);
-    UNREFERENCED_PARAMETER(pMappedSubresource);
-    /* TODO: Implement resource mapping via shared memory */
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pResource = (PVGPU_UMD_RESOURCE*)hResource.pDrvPrivate;
+    
+    if (pResource == NULL || pMappedSubresource == NULL)
+    {
+        return;
+    }
+    
+    /*
+     * Resource mapping in a paravirtualized driver requires:
+     * 1. Allocating space in shared memory heap
+     * 2. For read maps: Submitting command to host to copy data to heap
+     * 3. Returning the host-visible shared memory pointer to the app
+     * 4. On unmap: For write maps, submit command to copy heap to resource
+     * 
+     * For now, we implement a basic version that tracks the mapping
+     * but requires shared memory infrastructure to be fully functional.
+     */
+    
+    /* Build map command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.command_type = PVGPU_CMD_MAP_RESOURCE;
+    cmd.header.command_size = sizeof(cmd);
+    cmd.header.resource_id = pResource->HostHandle;
+    cmd.subresource = Subresource;
+    cmd.map_type = MapType;
+    cmd.heap_offset = 0; /* TODO: Allocate from shared memory heap */
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_MAP_RESOURCE, &cmd, sizeof(cmd));
+    
+    /* Mark resource as mapped */
+    pResource->IsMapped = TRUE;
+    
+    /*
+     * TODO: Return actual mapped pointer from shared memory.
+     * For now, return NULL which will cause apps to fail gracefully.
+     * In full implementation:
+     * - pMappedSubresource->pData = sharedMemoryBase + heapOffset
+     * - pMappedSubresource->RowPitch = calculated based on format/width
+     * - pMappedSubresource->DepthPitch = calculated for 3D textures
+     */
+    pMappedSubresource->pData = NULL;
+    pMappedSubresource->RowPitch = 0;
+    pMappedSubresource->DepthPitch = 0;
+    
+    PVGPU_TRACE("ResourceMap: resource %u subres %u type %d (NOT FULLY IMPLEMENTED)",
+        pResource->HostHandle, Subresource, MapType);
 }
 
 void APIENTRY PvgpuResourceUnmap(
@@ -1074,10 +1459,32 @@ void APIENTRY PvgpuResourceUnmap(
     _In_ D3D10DDI_HRESOURCE hResource,
     _In_ UINT Subresource)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(hResource);
-    UNREFERENCED_PARAMETER(Subresource);
-    /* TODO: Implement resource unmapping */
+    PVGPU_UMD_DEVICE* pDevice;
+    PVGPU_UMD_RESOURCE* pResource;
+    PvgpuCommandHeader cmd;
+    
+    pDevice = (PVGPU_UMD_DEVICE*)hDevice.pDrvPrivate;
+    pResource = (PVGPU_UMD_RESOURCE*)hResource.pDrvPrivate;
+    
+    if (pResource == NULL || !pResource->IsMapped)
+    {
+        return;
+    }
+    
+    /* Build unmap command */
+    ZeroMemory(&cmd, sizeof(cmd));
+    cmd.command_type = PVGPU_CMD_UNMAP_RESOURCE;
+    cmd.command_size = sizeof(cmd);
+    cmd.resource_id = pResource->HostHandle;
+    
+    PvgpuWriteCommand(pDevice, PVGPU_CMD_UNMAP_RESOURCE, &cmd, sizeof(cmd));
+    
+    /* Mark resource as unmapped */
+    pResource->IsMapped = FALSE;
+    pResource->MappedAddress = NULL;
+    pResource->MappedSize = 0;
+    
+    PVGPU_TRACE("ResourceUnmap: resource %u subres %u", pResource->HostHandle, Subresource);
 }
 
 /* ============================================================================

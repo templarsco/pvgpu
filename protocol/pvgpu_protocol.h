@@ -449,6 +449,53 @@ typedef struct PvgpuCmdPresent {
     uint32_t reserved;
 } PvgpuCmdPresent;
 
+/* CMD_SET_BLEND_STATE payload */
+typedef struct PvgpuCmdSetBlendState {
+    PvgpuCommandHeader header;
+    uint32_t blend_state_id;        /* Blend state resource ID (0 = default) */
+    float blend_factor[4];          /* Blend factor RGBA */
+    uint32_t sample_mask;           /* Sample mask for multisample coverage */
+    uint32_t reserved;
+} PvgpuCmdSetBlendState;
+
+/* CMD_SET_RASTERIZER_STATE payload */
+typedef struct PvgpuCmdSetRasterizerState {
+    PvgpuCommandHeader header;
+    uint32_t rasterizer_state_id;   /* Rasterizer state resource ID (0 = default) */
+    uint32_t reserved[3];
+} PvgpuCmdSetRasterizerState;
+
+/* CMD_SET_DEPTH_STENCIL payload */
+typedef struct PvgpuCmdSetDepthStencilState {
+    PvgpuCommandHeader header;
+    uint32_t depth_stencil_state_id; /* Depth stencil state resource ID (0 = default) */
+    uint32_t stencil_ref;            /* Stencil reference value */
+    uint32_t reserved[2];
+} PvgpuCmdSetDepthStencilState;
+
+/* CMD_COPY_RESOURCE payload */
+typedef struct PvgpuCmdCopyResource {
+    PvgpuCommandHeader header;
+    uint32_t dst_resource_id;       /* Destination resource ID */
+    uint32_t src_resource_id;       /* Source resource ID */
+    uint32_t reserved[2];
+} PvgpuCmdCopyResource;
+
+/* CMD_COPY_RESOURCE_REGION payload */
+typedef struct PvgpuCmdCopyResourceRegion {
+    PvgpuCommandHeader header;
+    uint32_t dst_resource_id;       /* Destination resource ID */
+    uint32_t dst_subresource;       /* Destination subresource index */
+    uint32_t dst_x, dst_y, dst_z;   /* Destination offset */
+    uint32_t src_resource_id;       /* Source resource ID */
+    uint32_t src_subresource;       /* Source subresource index */
+    uint32_t has_src_box;           /* Whether src_box is valid */
+    struct {
+        uint32_t left, top, front;
+        uint32_t right, bottom, back;
+    } src_box;
+} PvgpuCmdCopyResourceRegion;
+
 /*
  * =============================================================================
  * Error Codes

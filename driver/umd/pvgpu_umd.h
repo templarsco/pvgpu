@@ -46,6 +46,16 @@ extern "C" {
  * Resource Tracking
  * ============================================================================ */
 
+/* Shader types (mirrors PvgpuShaderStage from protocol) */
+typedef enum PVGPU_SHADER_TYPE {
+    PVGPU_SHADER_VERTEX   = 0,
+    PVGPU_SHADER_PIXEL    = 1,
+    PVGPU_SHADER_GEOMETRY = 2,
+    PVGPU_SHADER_HULL     = 3,
+    PVGPU_SHADER_DOMAIN   = 4,
+    PVGPU_SHADER_COMPUTE  = 5,
+} PVGPU_SHADER_TYPE;
+
 /* Resource types we track */
 typedef enum PVGPU_RESOURCE_TYPE {
     PVGPU_RESOURCE_TYPE_UNKNOWN = 0,
