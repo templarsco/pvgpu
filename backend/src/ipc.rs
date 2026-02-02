@@ -151,7 +151,8 @@ impl PipeServer {
         }
 
         // Parse header
-        let header: MessageHeader = unsafe { std::ptr::read_unaligned(header_buf.as_ptr() as *const MessageHeader) };
+        let header: MessageHeader =
+            unsafe { std::ptr::read_unaligned(header_buf.as_ptr() as *const MessageHeader) };
 
         // Read payload if present
         let mut payload = vec![0u8; header.payload_size as usize];
@@ -215,9 +216,8 @@ impl PipeServer {
         };
 
         // Serialize header to bytes
-        let header_bytes = unsafe {
-            std::slice::from_raw_parts(&header as *const _ as *const u8, HEADER_SIZE)
-        };
+        let header_bytes =
+            unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, HEADER_SIZE) };
 
         // Write header
         let mut bytes_written: u32 = 0;
