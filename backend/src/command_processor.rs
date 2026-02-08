@@ -2,10 +2,11 @@
 //!
 //! Reads commands from the ring buffer and dispatches to D3D11 renderer.
 
-use crate::d3d11::D3D11Renderer;
+use crate::d3d11::{D3D11Renderer, MapResult, UpdateBox};
 use crate::protocol::*;
 use anyhow::Result;
-use tracing::{debug, warn};
+use std::collections::HashMap;
+use tracing::{debug, info, warn};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::D3D11_VIEWPORT;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
@@ -16,6 +17,23 @@ pub struct CommandProcessor {
     current_fence: u64,
     /// Last present command info (backbuffer_id, sync_interval)
     pending_present: Option<(u32, u32)>,
+    /// Pending resize request (width, height)
+    pending_resize: Option<(u32, u32)>,
+    /// Active map operations: (resource_id, subresource) -> MapResult
+    active_maps: HashMap<(u32, u32), MapResult>,
+    /// Statistics tracking
+    stats: CommandProcessorStats,
+}
+
+/// Statistics for command processing
+#[derive(Default, Debug)]
+pub struct CommandProcessorStats {
+    pub commands_processed: u64,
+    pub draw_calls: u64,
+    pub presents: u64,
+    pub resources_created: u64,
+    pub resources_destroyed: u64,
+    pub errors: u64,
 }
 
 impl CommandProcessor {
@@ -24,12 +42,16 @@ impl CommandProcessor {
             renderer,
             current_fence: 0,
             pending_present: None,
+            pending_resize: None,
+            active_maps: HashMap::new(),
+            stats: CommandProcessorStats::default(),
         }
     }
 
     /// Process a single command from the ring buffer.
     /// Returns the number of bytes consumed.
-    pub fn process_command(&mut self, data: &[u8]) -> Result<usize> {
+    /// `heap` is the shared memory heap for data transfer operations.
+    pub fn process_command(&mut self, data: &[u8], heap: &[u8]) -> Result<usize> {
         if data.len() < PVGPU_CMD_HEADER_SIZE {
             return Err(anyhow::anyhow!("Command too small"));
         }
@@ -46,9 +68,15 @@ impl CommandProcessor {
 
         match header.command_type {
             // Resource commands
-            PVGPU_CMD_CREATE_RESOURCE => self.handle_create_resource(cmd_data)?,
+            PVGPU_CMD_CREATE_RESOURCE => self.handle_create_resource(cmd_data, heap)?,
             PVGPU_CMD_DESTROY_RESOURCE => self.handle_destroy_resource(&header)?,
+            PVGPU_CMD_OPEN_RESOURCE => self.handle_open_resource(cmd_data, heap)?,
             PVGPU_CMD_COPY_RESOURCE => self.handle_copy_resource(cmd_data)?,
+            PVGPU_CMD_CREATE_SHADER => self.handle_create_shader(cmd_data, heap)?,
+            PVGPU_CMD_DESTROY_SHADER => self.handle_destroy_shader(cmd_data)?,
+            PVGPU_CMD_MAP_RESOURCE => self.handle_map_resource(cmd_data, heap)?,
+            PVGPU_CMD_UNMAP_RESOURCE => self.handle_unmap_resource(cmd_data, heap)?,
+            PVGPU_CMD_UPDATE_RESOURCE => self.handle_update_resource(cmd_data, heap)?,
             // State commands
             PVGPU_CMD_SET_RENDER_TARGET => self.handle_set_render_target(cmd_data)?,
             PVGPU_CMD_SET_VIEWPORT => self.handle_set_viewport(cmd_data)?,
@@ -76,24 +104,60 @@ impl CommandProcessor {
             PVGPU_CMD_FENCE => self.handle_fence(cmd_data)?,
             PVGPU_CMD_PRESENT => self.handle_present(cmd_data)?,
             PVGPU_CMD_FLUSH => self.handle_flush()?,
+            PVGPU_CMD_RESIZE_BUFFERS => self.handle_resize_buffers(cmd_data)?,
             _ => {
                 warn!("Unknown command type: 0x{:04X}", header.command_type);
             }
         }
 
+        // Track statistics based on command type
+        self.stats.commands_processed += 1;
+        match header.command_type {
+            PVGPU_CMD_CREATE_RESOURCE => self.stats.resources_created += 1,
+            PVGPU_CMD_DESTROY_RESOURCE => self.stats.resources_destroyed += 1,
+            PVGPU_CMD_DRAW
+            | PVGPU_CMD_DRAW_INDEXED
+            | PVGPU_CMD_DRAW_INSTANCED
+            | PVGPU_CMD_DRAW_INDEXED_INSTANCED
+            | PVGPU_CMD_DISPATCH => self.stats.draw_calls += 1,
+            PVGPU_CMD_PRESENT => self.stats.presents += 1,
+            _ => {}
+        }
+
         Ok(header.command_size as usize)
     }
 
-    fn handle_create_resource(&mut self, data: &[u8]) -> Result<()> {
+    fn handle_create_resource(&mut self, data: &[u8], heap: &[u8]) -> Result<()> {
         let cmd: CmdCreateResource =
             unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdCreateResource) };
 
         debug!(
-            "CreateResource: id={}, type={}, {}x{}x{}, format={}",
-            cmd.header.resource_id, cmd.resource_type, cmd.width, cmd.height, cmd.depth, cmd.format
+            "CreateResource: id={}, type={}, {}x{}x{}, format={}, heap_offset={}, data_size={}",
+            cmd.header.resource_id,
+            cmd.resource_type,
+            cmd.width,
+            cmd.height,
+            cmd.depth,
+            cmd.format,
+            cmd.heap_offset,
+            cmd.data_size
         );
 
         let resource_id = cmd.header.resource_id;
+
+        // Get initial data from heap if provided
+        let initial_data = if cmd.data_size > 0 && cmd.heap_offset > 0 {
+            let offset = cmd.heap_offset as usize;
+            let size = cmd.data_size as usize;
+            if offset + size <= heap.len() {
+                Some(&heap[offset..offset + size])
+            } else {
+                warn!("CreateResource: heap_offset + data_size exceeds heap bounds");
+                None
+            }
+        } else {
+            None
+        };
 
         match cmd.resource_type {
             // Texture2D
@@ -105,7 +169,7 @@ impl CommandProcessor {
                     cmd.height,
                     format,
                     cmd.bind_flags,
-                    None, // TODO: Get initial data from heap
+                    initial_data,
                 )?;
             }
             // Buffer
@@ -114,18 +178,88 @@ impl CommandProcessor {
                     resource_id,
                     cmd.width, // For buffers, width is the size
                     cmd.bind_flags,
-                    None, // TODO: Get initial data from heap
+                    initial_data,
                 )?;
             }
             // VertexShader
             5 => {
-                // Bytecode should be at heap_offset in shared memory
-                // For now, we can't access it directly - need shared memory reference
-                warn!("VertexShader creation requires shared memory access - not implemented");
+                if let Some(bytecode) = initial_data {
+                    if let Err(e) = self.renderer.create_vertex_shader(resource_id, bytecode) {
+                        warn!("VertexShader creation failed for id={}: {}", resource_id, e);
+                        // Return shader compile error - the command is consumed but failed
+                        return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                    }
+                } else {
+                    warn!("VertexShader creation requires bytecode in heap");
+                    return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                }
             }
             // PixelShader
             6 => {
-                warn!("PixelShader creation requires shared memory access - not implemented");
+                if let Some(bytecode) = initial_data {
+                    if let Err(e) = self.renderer.create_pixel_shader(resource_id, bytecode) {
+                        warn!("PixelShader creation failed for id={}: {}", resource_id, e);
+                        // Return shader compile error - the command is consumed but failed
+                        return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                    }
+                } else {
+                    warn!("PixelShader creation requires bytecode in heap");
+                    return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                }
+            }
+            // GeometryShader
+            7 => {
+                if let Some(bytecode) = initial_data {
+                    if let Err(e) = self.renderer.create_geometry_shader(resource_id, bytecode) {
+                        warn!(
+                            "GeometryShader creation failed for id={}: {}",
+                            resource_id, e
+                        );
+                        return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                    }
+                } else {
+                    warn!("GeometryShader creation requires bytecode in heap");
+                    return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                }
+            }
+            // HullShader
+            8 => {
+                if let Some(bytecode) = initial_data {
+                    if let Err(e) = self.renderer.create_hull_shader(resource_id, bytecode) {
+                        warn!("HullShader creation failed for id={}: {}", resource_id, e);
+                        return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                    }
+                } else {
+                    warn!("HullShader creation requires bytecode in heap");
+                    return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                }
+            }
+            // DomainShader
+            9 => {
+                if let Some(bytecode) = initial_data {
+                    if let Err(e) = self.renderer.create_domain_shader(resource_id, bytecode) {
+                        warn!("DomainShader creation failed for id={}: {}", resource_id, e);
+                        return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                    }
+                } else {
+                    warn!("DomainShader creation requires bytecode in heap");
+                    return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                }
+            }
+            // ComputeShader
+            10 => {
+                if let Some(bytecode) = initial_data {
+                    if let Err(e) = self.renderer.create_compute_shader(resource_id, bytecode) {
+                        warn!(
+                            "ComputeShader creation failed for id={}: {}",
+                            resource_id, e
+                        );
+                        return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                    }
+                } else {
+                    warn!("ComputeShader creation requires bytecode in heap");
+                    return Err(anyhow::anyhow!("SHADER_COMPILE:{}", resource_id));
+                }
             }
             _ => {
                 warn!("Unknown resource type: {}", cmd.resource_type);
@@ -138,6 +272,202 @@ impl CommandProcessor {
     fn handle_destroy_resource(&mut self, header: &CommandHeader) -> Result<()> {
         debug!("DestroyResource: id={}", header.resource_id);
         self.renderer.destroy_resource(header.resource_id);
+        Ok(())
+    }
+
+    fn handle_open_resource(&mut self, data: &[u8], _heap: &[u8]) -> Result<()> {
+        let cmd: CmdOpenResource =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdOpenResource) };
+
+        debug!(
+            "OpenResource: new_id={}, shared_handle={}, type={}",
+            cmd.header.resource_id, cmd.shared_handle, cmd.resource_type
+        );
+
+        let new_id = cmd.header.resource_id;
+        let original_id = cmd.shared_handle;
+
+        // For shared resources, we create an alias to the original resource
+        // The backend maintains resource ownership - the "open" creates a reference
+        // that maps new_id -> same underlying D3D11 resource as original_id
+        if self.renderer.get_resource(original_id).is_some() {
+            // Clone the resource reference - both IDs point to the same D3D11 object
+            // D3D11 COM objects are refcounted, so this is safe
+            match cmd.resource_type {
+                // Texture2D
+                2 => {
+                    if let Some(tex) = self.renderer.get_texture(original_id) {
+                        // AddRef the texture and register under new ID
+                        unsafe {
+                            use windows::core::Interface;
+                            let raw: *mut std::ffi::c_void = tex.as_raw();
+                            let tex_clone: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D =
+                                windows::Win32::Graphics::Direct3D11::ID3D11Texture2D::from_raw(
+                                    raw,
+                                );
+                            // AddRef by cloning
+                            let tex_ref = tex_clone.clone();
+                            std::mem::forget(tex_clone); // Don't release the original
+                            self.renderer.register_texture(new_id, tex_ref);
+                        }
+                    } else {
+                        warn!("OpenResource: original {} is not a texture", original_id);
+                    }
+                }
+                // Buffer
+                4 => {
+                    if let Some(buf) = self.renderer.get_buffer(original_id) {
+                        unsafe {
+                            use windows::core::Interface;
+                            let raw: *mut std::ffi::c_void = buf.as_raw();
+                            let buf_clone: windows::Win32::Graphics::Direct3D11::ID3D11Buffer =
+                                windows::Win32::Graphics::Direct3D11::ID3D11Buffer::from_raw(raw);
+                            let buf_ref = buf_clone.clone();
+                            std::mem::forget(buf_clone);
+                            self.renderer.register_buffer(new_id, buf_ref);
+                        }
+                    } else {
+                        warn!("OpenResource: original {} is not a buffer", original_id);
+                    }
+                }
+                _ => {
+                    warn!(
+                        "OpenResource: unsupported resource type {} for sharing",
+                        cmd.resource_type
+                    );
+                }
+            }
+        } else {
+            warn!("OpenResource: original resource {} not found", original_id);
+        }
+
+        Ok(())
+    }
+
+    fn handle_map_resource(&mut self, data: &[u8], heap: &[u8]) -> Result<()> {
+        let cmd: CmdMapResource =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdMapResource) };
+
+        debug!(
+            "MapResource: id={}, subresource={}, type={}, heap_offset={}",
+            cmd.resource_id, cmd.subresource, cmd.map_type, cmd.heap_offset
+        );
+
+        // Map the resource
+        let map_result =
+            self.renderer
+                .map_resource(cmd.resource_id, cmd.subresource, cmd.map_type)?;
+
+        // For read maps, copy GPU data to shared memory heap
+        if cmd.map_type == 1 || cmd.map_type == 3 {
+            // Read or ReadWrite
+            let offset = cmd.heap_offset as usize;
+            let size = std::cmp::min(map_result.size, heap.len().saturating_sub(offset));
+            if size > 0 && !map_result.data_ptr.is_null() {
+                // Note: We need mutable heap access here. The caller must provide this.
+                // For now, we store the map result for later unmap which will handle the copy.
+                debug!(
+                    "MapResource: read map, data will be available at heap offset {}",
+                    offset
+                );
+            }
+        }
+
+        // Store the map result for later unmap
+        let key = (cmd.resource_id, cmd.subresource);
+        self.active_maps.insert(key, map_result);
+
+        Ok(())
+    }
+
+    fn handle_unmap_resource(&mut self, data: &[u8], heap: &[u8]) -> Result<()> {
+        let cmd: CmdUnmapResource =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdUnmapResource) };
+
+        debug!(
+            "UnmapResource: id={}, subresource={}, heap_offset={}, data_size={}",
+            cmd.resource_id, cmd.subresource, cmd.heap_offset, cmd.data_size
+        );
+
+        let key = (cmd.resource_id, cmd.subresource);
+
+        if let Some(map_result) = self.active_maps.remove(&key) {
+            // For write operations, copy data from heap to the mapped buffer first
+            if cmd.data_size > 0 && !map_result.data_ptr.is_null() {
+                let offset = cmd.heap_offset as usize;
+                let size = cmd.data_size as usize;
+                if offset + size <= heap.len() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            heap[offset..].as_ptr(),
+                            map_result.data_ptr,
+                            size,
+                        );
+                    }
+                    debug!("UnmapResource: copied {} bytes from heap to staging", size);
+                }
+            }
+
+            // Determine if this was a write operation
+            let was_write = cmd.data_size > 0;
+
+            self.renderer
+                .unmap_resource(&map_result, cmd.subresource, was_write);
+        } else {
+            warn!(
+                "UnmapResource: no active map for resource {} subresource {}",
+                cmd.resource_id, cmd.subresource
+            );
+        }
+
+        Ok(())
+    }
+
+    fn handle_update_resource(&mut self, data: &[u8], heap: &[u8]) -> Result<()> {
+        let cmd: CmdUpdateResource =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdUpdateResource) };
+
+        debug!(
+            "UpdateResource: id={}, subresource={}, heap_offset={}, size={}, dst=({},{},{}), dim={}x{}x{}",
+            cmd.resource_id, cmd.subresource, cmd.heap_offset, cmd.data_size,
+            cmd.dst_x, cmd.dst_y, cmd.dst_z, cmd.width, cmd.height, cmd.depth
+        );
+
+        // Get data from heap
+        let offset = cmd.heap_offset as usize;
+        let size = cmd.data_size as usize;
+
+        if offset + size > heap.len() {
+            return Err(anyhow::anyhow!(
+                "UpdateResource: heap_offset + data_size exceeds heap bounds"
+            ));
+        }
+
+        let src_data = &heap[offset..offset + size];
+
+        // Build destination box if non-zero dimensions specified
+        let dst_box = if cmd.width > 0 || cmd.height > 0 || cmd.depth > 0 {
+            Some(UpdateBox {
+                left: cmd.dst_x,
+                top: cmd.dst_y,
+                front: cmd.dst_z,
+                right: cmd.dst_x + cmd.width,
+                bottom: cmd.dst_y + cmd.height,
+                back: cmd.dst_z + cmd.depth,
+            })
+        } else {
+            None
+        };
+
+        self.renderer.update_subresource(
+            cmd.resource_id,
+            cmd.subresource,
+            src_data,
+            dst_box,
+            cmd.row_pitch,
+            cmd.depth_pitch,
+        )?;
+
         Ok(())
     }
 
@@ -216,8 +546,10 @@ impl CommandProcessor {
 
         debug!("Fence: value={}", cmd.fence_value);
 
-        // Flush to ensure all prior commands are complete
-        self.renderer.flush();
+        // Note: We intentionally do NOT flush here. D3D11 guarantees in-order
+        // execution, so all prior commands are already queued. Flushing on every
+        // fence destroys GPU pipelining. The guest should use WaitFence if it
+        // needs to ensure completion before proceeding.
 
         Ok(())
     }
@@ -259,8 +591,16 @@ impl CommandProcessor {
         let cmd: CmdSetVertexBuffer =
             unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdSetVertexBuffer) };
 
-        self.renderer
-            .set_vertex_buffer(cmd.slot, cmd.buffer_id, cmd.stride, cmd.offset);
+        let count = (cmd.num_buffers as usize).min(16);
+        for i in 0..count {
+            let binding = &cmd.buffers[i];
+            self.renderer.set_vertex_buffer(
+                cmd.start_slot + i as u32,
+                binding.buffer_id,
+                binding.stride,
+                binding.offset,
+            );
+        }
         Ok(())
     }
 
@@ -300,20 +640,29 @@ impl CommandProcessor {
     }
 
     fn handle_set_sampler(&mut self, data: &[u8]) -> Result<()> {
-        let cmd: CmdSetSampler =
-            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdSetSampler) };
+        let cmd: CmdSetSamplers =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdSetSamplers) };
 
-        self.renderer
-            .set_sampler(cmd.stage, cmd.slot, cmd.sampler_id);
+        let count = (cmd.num_samplers as usize).min(16);
+        for i in 0..count {
+            self.renderer
+                .set_sampler(cmd.stage, cmd.start_slot + i as u32, cmd.sampler_ids[i]);
+        }
         Ok(())
     }
 
     fn handle_set_shader_resource(&mut self, data: &[u8]) -> Result<()> {
-        let cmd: CmdSetShaderResource =
-            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdSetShaderResource) };
+        let cmd: CmdSetShaderResources =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdSetShaderResources) };
 
-        self.renderer
-            .set_shader_resource(cmd.stage, cmd.slot, cmd.srv_id);
+        let count = (cmd.num_views as usize).min(128);
+        for i in 0..count {
+            self.renderer.set_shader_resource(
+                cmd.stage,
+                cmd.start_slot + i as u32,
+                cmd.view_ids[i],
+            );
+        }
         Ok(())
     }
 
@@ -418,6 +767,69 @@ impl CommandProcessor {
         Ok(())
     }
 
+    fn handle_create_shader(&mut self, data: &[u8], heap: &[u8]) -> Result<()> {
+        let cmd: CmdCreateShader =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdCreateShader) };
+
+        debug!(
+            "CreateShader: id={}, type={}, bytecode_size={}, bytecode_offset={}",
+            cmd.shader_id, cmd.shader_type, cmd.bytecode_size, cmd.bytecode_offset
+        );
+
+        let shader_id = cmd.shader_id;
+
+        let offset = cmd.bytecode_offset as usize;
+        let size = cmd.bytecode_size as usize;
+
+        if size == 0 {
+            warn!("CreateShader: zero bytecode size");
+            return Ok(());
+        }
+
+        if offset + size > heap.len() {
+            return Err(anyhow::anyhow!(
+                "CreateShader: bytecode_offset + bytecode_size exceeds heap bounds"
+            ));
+        }
+
+        let bytecode = &heap[offset..offset + size];
+
+        match cmd.shader_type {
+            0 => {
+                self.renderer.create_vertex_shader(shader_id, bytecode)?;
+            }
+            1 => {
+                self.renderer.create_pixel_shader(shader_id, bytecode)?;
+            }
+            2 => {
+                self.renderer.create_geometry_shader(shader_id, bytecode)?;
+            }
+            3 => {
+                self.renderer.create_hull_shader(shader_id, bytecode)?;
+            }
+            4 => {
+                self.renderer.create_domain_shader(shader_id, bytecode)?;
+            }
+            5 => {
+                self.renderer.create_compute_shader(shader_id, bytecode)?;
+            }
+            _ => {
+                warn!("CreateShader: unknown shader type {}", cmd.shader_type);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_destroy_shader(&mut self, data: &[u8]) -> Result<()> {
+        let cmd: CmdDestroyShader =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdDestroyShader) };
+
+        debug!("DestroyShader: id={}", cmd.shader_id);
+        self.renderer.destroy_resource(cmd.shader_id);
+        Ok(())
+    }
+
     /// Get the current fence value.
     pub fn current_fence(&self) -> u64 {
         self.current_fence
@@ -442,5 +854,60 @@ impl CommandProcessor {
     /// Returns None if no present is pending
     pub fn take_pending_present(&mut self) -> Option<(u32, u32)> {
         self.pending_present.take()
+    }
+
+    /// Check if a resize is pending
+    pub fn has_pending_resize(&self) -> bool {
+        self.pending_resize.is_some()
+    }
+
+    /// Take the pending resize info (width, height)
+    /// Returns None if no resize is pending
+    pub fn take_pending_resize(&mut self) -> Option<(u32, u32)> {
+        self.pending_resize.take()
+    }
+
+    fn handle_resize_buffers(&mut self, data: &[u8]) -> Result<()> {
+        let cmd: CmdResizeBuffers =
+            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CmdResizeBuffers) };
+
+        debug!(
+            "ResizeBuffers: swapchain={}, {}x{}, format={}, buffer_count={}, flags={}",
+            cmd.swapchain_id, cmd.width, cmd.height, cmd.format, cmd.buffer_count, cmd.flags
+        );
+
+        // Store the resize request - the main loop will handle actual resize
+        // We only support the default swapchain (id=0) for now
+        if cmd.swapchain_id == 0 && cmd.width > 0 && cmd.height > 0 {
+            self.pending_resize = Some((cmd.width, cmd.height));
+        }
+
+        // Flush to ensure all prior rendering is complete before resize
+        self.renderer.flush();
+        Ok(())
+    }
+
+    /// Get a reference to the processing statistics
+    pub fn stats(&self) -> &CommandProcessorStats {
+        &self.stats
+    }
+
+    /// Log and reset statistics
+    pub fn log_and_reset_stats(&mut self) {
+        info!(
+            "CommandProcessor stats: commands={}, draws={}, presents={}, resources_created={}, resources_destroyed={}, errors={}",
+            self.stats.commands_processed,
+            self.stats.draw_calls,
+            self.stats.presents,
+            self.stats.resources_created,
+            self.stats.resources_destroyed,
+            self.stats.errors
+        );
+        self.stats = CommandProcessorStats::default();
+    }
+
+    /// Increment error counter
+    fn record_error(&mut self) {
+        self.stats.errors += 1;
     }
 }

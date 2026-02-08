@@ -3,7 +3,7 @@
 //! Manual Rust bindings for the PVGPU protocol defined in pvgpu_protocol.h.
 //! These match the C structures for shared memory communication.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Magic number: "PVGP" in little-endian
 pub const PVGPU_MAGIC: u32 = 0x50564750;
@@ -30,8 +30,11 @@ pub const PVGPU_FEATURE_HDR: u64 = 1 << 6;
 pub const PVGPU_FEATURE_VSYNC: u64 = 1 << 7;
 pub const PVGPU_FEATURE_TRIPLE_BUFFER: u64 = 1 << 8;
 
-pub const PVGPU_FEATURES_MVP: u64 =
-    PVGPU_FEATURE_D3D11 | PVGPU_FEATURE_COMPUTE | PVGPU_FEATURE_VSYNC;
+pub const PVGPU_FEATURES_MVP: u64 = PVGPU_FEATURE_D3D11
+    | PVGPU_FEATURE_COMPUTE
+    | PVGPU_FEATURE_GEOMETRY
+    | PVGPU_FEATURE_TESSELLATION
+    | PVGPU_FEATURE_VSYNC;
 
 // =============================================================================
 // Command Types
@@ -44,6 +47,7 @@ pub const PVGPU_CMD_MAP_RESOURCE: u32 = 0x0003;
 pub const PVGPU_CMD_UNMAP_RESOURCE: u32 = 0x0004;
 pub const PVGPU_CMD_UPDATE_RESOURCE: u32 = 0x0005;
 pub const PVGPU_CMD_COPY_RESOURCE: u32 = 0x0006;
+pub const PVGPU_CMD_OPEN_RESOURCE: u32 = 0x0007;
 
 // State commands: 0x0100 - 0x01FF
 pub const PVGPU_CMD_SET_RENDER_TARGET: u32 = 0x0101;
@@ -70,11 +74,16 @@ pub const PVGPU_CMD_DISPATCH: u32 = 0x0205;
 pub const PVGPU_CMD_CLEAR_RENDER_TARGET: u32 = 0x0206;
 pub const PVGPU_CMD_CLEAR_DEPTH_STENCIL: u32 = 0x0207;
 
+// Shader commands: 0x0030 - 0x003F
+pub const PVGPU_CMD_CREATE_SHADER: u32 = 0x0030;
+pub const PVGPU_CMD_DESTROY_SHADER: u32 = 0x0031;
+
 // Sync commands: 0x0300 - 0x03FF
 pub const PVGPU_CMD_FENCE: u32 = 0x0301;
 pub const PVGPU_CMD_PRESENT: u32 = 0x0302;
 pub const PVGPU_CMD_FLUSH: u32 = 0x0303;
 pub const PVGPU_CMD_WAIT_FENCE: u32 = 0x0304;
+pub const PVGPU_CMD_RESIZE_BUFFERS: u32 = 0x0305;
 
 // =============================================================================
 // Error Codes
@@ -91,7 +100,21 @@ pub const PVGPU_ERROR_UNSUPPORTED_FORMAT: u32 = 0x0007;
 pub const PVGPU_ERROR_BACKEND_DISCONNECTED: u32 = 0x0008;
 pub const PVGPU_ERROR_RING_FULL: u32 = 0x0009;
 pub const PVGPU_ERROR_TIMEOUT: u32 = 0x000A;
+pub const PVGPU_ERROR_HEAP_EXHAUSTED: u32 = 0x000B;
+pub const PVGPU_ERROR_INTERNAL: u32 = 0x000C;
 pub const PVGPU_ERROR_UNKNOWN: u32 = 0xFFFF;
+
+// =============================================================================
+// Device Status Flags
+// =============================================================================
+
+pub const PVGPU_STATUS_READY: u32 = 1 << 0;
+pub const PVGPU_STATUS_ERROR: u32 = 1 << 1;
+pub const PVGPU_STATUS_DEVICE_LOST: u32 = 1 << 2;
+pub const PVGPU_STATUS_BACKEND_BUSY: u32 = 1 << 3;
+pub const PVGPU_STATUS_RESIZING: u32 = 1 << 4;
+pub const PVGPU_STATUS_RECOVERY: u32 = 1 << 5;
+pub const PVGPU_STATUS_SHUTDOWN: u32 = 1 << 6;
 
 // =============================================================================
 // Resource Types
@@ -142,6 +165,11 @@ pub enum ShaderStage {
 ///
 /// SAFETY: This struct must match the exact memory layout of PvgpuControlRegion in C.
 /// It is designed to be mapped directly to shared memory.
+///
+/// Hot pointers (producer_ptr, consumer_ptr, fence values) are each placed on
+/// separate 64-byte cache lines to prevent false sharing between the guest CPU
+/// (writing producer_ptr / guest_fence_request) and the host CPU (writing
+/// consumer_ptr / host_fence_completed).
 #[repr(C)]
 pub struct ControlRegion {
     // 0x000
@@ -155,29 +183,38 @@ pub struct ControlRegion {
     pub heap_offset: u32,
     pub heap_size: u32,
 
-    // Producer-consumer pointers - 0x020
-    // These are atomic in C, we use AtomicU64 for Rust
+    // Producer pointer - 0x020 (own cache line)
     producer_ptr_raw: u64,
+    _pad_producer: [u8; 56],
+
+    // Consumer pointer - 0x060 (own cache line)
     consumer_ptr_raw: u64,
+    _pad_consumer: [u8; 56],
 
-    // Fence synchronization - 0x030
+    // Guest fence request - 0x0A0 (own cache line)
     guest_fence_request_raw: u64,
-    host_fence_completed_raw: u64,
+    _pad_guest_fence: [u8; 56],
 
-    // Status and error - 0x040
-    pub status: u32,
-    pub error_code: u32,
-    pub error_data: u32,
+    // Host fence completed - 0x0E0 (own cache line)
+    host_fence_completed_raw: u64,
+    _pad_host_fence: [u8; 56],
+
+    // Status and error - 0x120
+    // Using AtomicU32 to allow safe volatile-like access through &self
+    // (same size/alignment as u32, no layout change)
+    status: AtomicU32,
+    error_code: AtomicU32,
+    error_data: AtomicU32,
     _reserved1: u32,
 
-    // Display configuration - 0x050
+    // Display configuration - 0x130
     pub display_width: u32,
     pub display_height: u32,
     pub display_refresh: u32,
     pub display_format: u32,
 
-    // Reserved - 0x060 to 0xFFF
-    _reserved: [u8; 0xFA0],
+    // Reserved - 0x140 to 0xFFF
+    _reserved: [u8; 0xEC0],
 }
 
 impl ControlRegion {
@@ -242,6 +279,70 @@ impl ControlRegion {
     pub fn pending_bytes(&self) -> u64 {
         self.producer_ptr().saturating_sub(self.consumer_ptr())
     }
+
+    // =========================================================================
+    // Status and Error Reporting Methods
+    // =========================================================================
+
+    /// Set device status flags atomically (replaces current status).
+    pub fn set_status(&self, status: u32) {
+        self.status.store(status, Ordering::Release);
+    }
+
+    /// Get current device status.
+    pub fn get_status(&self) -> u32 {
+        self.status.load(Ordering::Acquire)
+    }
+
+    /// Set a status flag (OR with current status).
+    pub fn set_status_flag(&self, flag: u32) {
+        self.status.fetch_or(flag, Ordering::AcqRel);
+    }
+
+    /// Clear a status flag (AND NOT with current status).
+    pub fn clear_status_flag(&self, flag: u32) {
+        self.status.fetch_and(!flag, Ordering::AcqRel);
+    }
+
+    /// Set error code and data, also sets the ERROR status flag.
+    pub fn set_error(&self, code: u32, data: u32) {
+        self.error_code.store(code, Ordering::Release);
+        self.error_data.store(data, Ordering::Release);
+        // Also set error status flag
+        self.set_status_flag(PVGPU_STATUS_ERROR);
+    }
+
+    /// Get current error code.
+    pub fn get_error_code(&self) -> u32 {
+        self.error_code.load(Ordering::Acquire)
+    }
+
+    /// Get current error data.
+    pub fn get_error_data(&self) -> u32 {
+        self.error_data.load(Ordering::Acquire)
+    }
+
+    /// Clear error state (sets error code and data to 0, clears ERROR flag).
+    pub fn clear_error(&self) {
+        self.error_code.store(0, Ordering::Release);
+        self.error_data.store(0, Ordering::Release);
+        self.clear_status_flag(PVGPU_STATUS_ERROR);
+    }
+
+    /// Check if device is in ready state.
+    pub fn is_ready(&self) -> bool {
+        (self.get_status() & PVGPU_STATUS_READY) != 0
+    }
+
+    /// Check if device has an error.
+    pub fn has_error(&self) -> bool {
+        (self.get_status() & PVGPU_STATUS_ERROR) != 0
+    }
+
+    /// Check if device is lost.
+    pub fn is_device_lost(&self) -> bool {
+        (self.get_status() & PVGPU_STATUS_DEVICE_LOST) != 0
+    }
 }
 
 // Verify size at compile time
@@ -292,6 +393,19 @@ pub struct CmdCreateResource {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+pub struct CmdOpenResource {
+    pub header: CommandHeader,
+    pub shared_handle: u32,
+    pub resource_type: u32,
+    pub format: u32,
+    pub width: u32,
+    pub height: u32,
+    pub bind_flags: u32,
+    pub misc_flags: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct CmdSetRenderTarget {
     pub header: CommandHeader,
@@ -325,6 +439,24 @@ pub struct CmdSetShader {
     pub header: CommandHeader,
     pub stage: u32,
     pub shader_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdCreateShader {
+    pub header: CommandHeader,
+    pub shader_id: u32,
+    pub shader_type: u32,
+    pub bytecode_size: u32,
+    pub bytecode_offset: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdDestroyShader {
+    pub header: CommandHeader,
+    pub shader_id: u32,
+    pub _reserved: [u32; 3],
 }
 
 #[repr(C)]
@@ -373,12 +505,19 @@ pub struct CmdClearRenderTarget {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct CmdSetVertexBuffer {
-    pub header: CommandHeader,
-    pub slot: u32,
+pub struct VertexBufferBinding {
     pub buffer_id: u32,
     pub stride: u32,
     pub offset: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdSetVertexBuffer {
+    pub header: CommandHeader,
+    pub start_slot: u32,
+    pub num_buffers: u32,
+    pub buffers: [VertexBufferBinding; 16],
 }
 
 #[repr(C)]
@@ -398,7 +537,8 @@ pub struct CmdSetConstantBuffer {
     pub stage: u32, // ShaderStage enum
     pub slot: u32,
     pub buffer_id: u32,
-    pub _reserved: u32,
+    pub offset: u32,
+    pub size: u32,
 }
 
 #[repr(C)]
@@ -419,22 +559,22 @@ pub struct CmdSetPrimitiveTopology {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct CmdSetSampler {
+pub struct CmdSetSamplers {
     pub header: CommandHeader,
     pub stage: u32,
-    pub slot: u32,
-    pub sampler_id: u32,
-    pub _reserved: u32,
+    pub start_slot: u32,
+    pub num_samplers: u32,
+    pub sampler_ids: [u32; 16],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct CmdSetShaderResource {
+pub struct CmdSetShaderResources {
     pub header: CommandHeader,
     pub stage: u32,
-    pub slot: u32,
-    pub srv_id: u32,
-    pub _reserved: u32,
+    pub start_slot: u32,
+    pub num_views: u32,
+    pub view_ids: [u32; 128],
 }
 
 #[repr(C)]
@@ -477,7 +617,6 @@ pub struct ScissorRect {
 pub struct CmdSetScissor {
     pub header: CommandHeader,
     pub num_rects: u32,
-    pub _reserved: [u32; 3],
     pub rects: [ScissorRect; 16],
 }
 
@@ -500,7 +639,7 @@ pub struct CmdDrawIndexedInstanced {
     pub start_index: u32,
     pub base_vertex: i32,
     pub start_instance: u32,
-    pub _reserved: u32,
+    pub _reserved: [u32; 3],
 }
 
 #[repr(C)]
@@ -531,6 +670,53 @@ pub struct CmdCopyResource {
     pub dst_resource_id: u32,
     pub src_resource_id: u32,
     pub _reserved: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdResizeBuffers {
+    pub header: CommandHeader,
+    pub swapchain_id: u32, // Swapchain to resize (0 = default)
+    pub width: u32,        // New width in pixels
+    pub height: u32,       // New height in pixels
+    pub format: u32,       // New format (DXGI_FORMAT, 0 = keep current)
+    pub buffer_count: u32, // New buffer count (0 = keep current)
+    pub flags: u32,        // Resize flags
+    pub _reserved: [u32; 2],
+}
+
+/// Map access type
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum MapType {
+    Read = 1,
+    Write = 2,
+    ReadWrite = 3,
+    WriteDiscard = 4,
+    WriteNoOverwrite = 5,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdMapResource {
+    pub header: CommandHeader,
+    pub resource_id: u32,
+    pub subresource: u32,
+    pub map_type: u32, // MapType enum
+    pub map_flags: u32,
+    pub heap_offset: u32, // Output: where mapped data will be written/read
+    pub _reserved: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CmdUnmapResource {
+    pub header: CommandHeader,
+    pub resource_id: u32,
+    pub subresource: u32,
+    pub heap_offset: u32, // Where the data was mapped
+    pub data_size: u32,   // Size of data to copy back (for write maps)
 }
 
 #[repr(C)]

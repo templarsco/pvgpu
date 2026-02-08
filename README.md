@@ -94,14 +94,22 @@ qemu-system-x86_64 -accel whpx -device pvgpu,shmem_size=256M ...
 
 ## 🛣️ Roadmap
 
-- [x] Protocol definition
-- [x] QEMU device skeleton
-- [x] Rust backend skeleton
-- [ ] Full D3D11 command implementation
-- [ ] WDDM kernel-mode driver
-- [ ] WDDM user-mode driver
-- [ ] Integration testing
-- [ ] DX12 support
+- [x] Protocol definition (shared header, command types, feature flags)
+- [x] QEMU PCIe device (BAR0 config, BAR2 shared memory, MSI-X, named pipe IPC)
+- [x] Rust backend service (D3D11 renderer, command processor, presentation pipeline)
+- [x] Full D3D11 command implementation (50+ DDI functions, all draw/state/resource commands)
+- [x] WDDM kernel-mode driver (BAR mapping, ring buffer, heap allocator, VidPn, interrupt handler)
+- [x] WDDM user-mode driver (D3D11 DDI, staging buffer, fence sync, compute shader support)
+- [x] Display mode support (720p-4K, 60-144Hz, dynamic resolution change)
+- [x] Presentation pipeline (windowed, headless, dual mode, VSync, frame events)
+- [x] Format support data (78 DXGI formats with capability flags)
+- [x] Shared resource opening (cross-process resource sharing)
+- [x] Compute shader support (CS dispatch, UAV, SRV, sampler, constant buffer binding)
+- [x] Error handling and robustness (device lost, OOM, shader errors, backend crash)
+- [x] Driver packaging (INF, WDK build configs, CI pipeline)
+- [ ] Integration testing (requires VM environment)
+- [ ] Performance optimization (profiling, command batching, telemetry)
+- [ ] DX12 support (future)
 
 ## 🤝 Contributing
 

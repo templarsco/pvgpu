@@ -21,8 +21,10 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIFactory2, IDXGISwapChain1, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
-    DXGI_SWAP_EFFECT_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIFactory2, IDXGIFactory5, IDXGISwapChain1, DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+    DXGI_PRESENT, DXGI_PRESENT_ALLOW_TEARING, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -53,6 +55,10 @@ pub struct PresentationConfig {
     pub window_title: String,
     /// Name for the shared texture event (e.g., "Global\\PVGPU_FrameEvent")
     pub frame_event_name: Option<String>,
+    /// Number of buffers for swapchain (2 = double buffer, 3 = triple buffer)
+    pub buffer_count: u32,
+    /// Allow tearing (for variable refresh rate displays)
+    pub allow_tearing: bool,
 }
 
 impl Default for PresentationConfig {
@@ -64,6 +70,8 @@ impl Default for PresentationConfig {
             vsync: true,
             window_title: "PVGPU Output".to_string(),
             frame_event_name: Some("Global\\PVGPU_FrameEvent".to_string()),
+            buffer_count: 2, // Double buffering by default
+            allow_tearing: false,
         }
     }
 }
@@ -91,6 +99,14 @@ pub struct PresentationPipeline {
 
     // Shutdown flag
     shutdown: Arc<AtomicBool>,
+
+    // Tearing support (for VRR displays)
+    tearing_supported: bool,
+
+    // Frame timing
+    frame_count: u64,
+    last_present_time: std::time::Instant,
+    frame_times: Vec<std::time::Duration>,
 }
 
 impl PresentationPipeline {
@@ -101,9 +117,15 @@ impl PresentationPipeline {
         config: PresentationConfig,
     ) -> Result<Self> {
         info!(
-            "Creating presentation pipeline: {:?} {}x{} vsync={}",
-            config.mode, config.width, config.height, config.vsync
+            "Creating presentation pipeline: {:?} {}x{} vsync={} buffers={}",
+            config.mode, config.width, config.height, config.vsync, config.buffer_count
         );
+
+        // Check for tearing support (DXGI 1.5+)
+        let tearing_supported = check_tearing_support(&device);
+        if tearing_supported {
+            info!("Variable refresh rate (tearing) is supported");
+        }
 
         let mut pipeline = Self {
             config: config.clone(),
@@ -117,6 +139,10 @@ impl PresentationPipeline {
             frame_event: None,
             window_class_registered: false,
             shutdown: Arc::new(AtomicBool::new(false)),
+            tearing_supported,
+            frame_count: 0,
+            last_present_time: std::time::Instant::now(),
+            frame_times: Vec::with_capacity(120), // Store last ~2 seconds at 60fps
         };
 
         // Create window if needed
@@ -230,14 +256,26 @@ impl PresentationPipeline {
     fn create_swapchain(&mut self) -> Result<()> {
         let hwnd = self.hwnd.ok_or_else(|| anyhow!("No window created"))?;
 
-        info!("Creating swapchain for window");
+        info!(
+            "Creating swapchain: {} buffers, tearing={}",
+            self.config.buffer_count,
+            self.config.allow_tearing && self.tearing_supported
+        );
 
         // Get DXGI device and factory
         let dxgi_device: windows::Win32::Graphics::Dxgi::IDXGIDevice = self.device.cast()?;
         let dxgi_adapter = unsafe { dxgi_device.GetAdapter()? };
         let dxgi_factory: IDXGIFactory2 = unsafe { dxgi_adapter.GetParent()? };
 
-        // Swapchain description
+        // Determine swapchain flags
+        let use_tearing = self.config.allow_tearing && self.tearing_supported;
+        let flags = if use_tearing {
+            DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 as u32
+        } else {
+            0
+        };
+
+        // Swapchain description using FLIP model for better performance
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: self.config.width,
             Height: self.config.height,
@@ -248,11 +286,11 @@ impl PresentationPipeline {
                 Quality: 0,
             },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            BufferCount: 2,
+            BufferCount: self.config.buffer_count.max(2), // FLIP model requires at least 2
             Scaling: windows::Win32::Graphics::Dxgi::DXGI_SCALING_STRETCH,
-            SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD, // Modern FLIP model
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            Flags: 0,
+            Flags: flags,
         };
 
         let swapchain =
@@ -269,7 +307,10 @@ impl PresentationPipeline {
         self.swapchain = Some(swapchain);
         self.backbuffer_rtv = rtv;
 
-        info!("Swapchain created successfully");
+        info!(
+            "Swapchain created: {} buffers, FLIP_DISCARD, tearing={}",
+            self.config.buffer_count, use_tearing
+        );
 
         Ok(())
     }
@@ -340,7 +381,10 @@ impl PresentationPipeline {
     /// This copies the source texture to the swapchain backbuffer and/or shared texture,
     /// then presents and signals the frame event.
     pub fn present(&mut self, source_texture: &ID3D11Texture2D) -> Result<()> {
-        debug!("Presenting frame");
+        debug!("Presenting frame {}", self.frame_count);
+
+        let now = std::time::Instant::now();
+        let frame_time = now - self.last_present_time;
 
         // Copy to swapchain backbuffer if in windowed/dual mode
         if let Some(ref swapchain) = self.swapchain {
@@ -350,10 +394,12 @@ impl PresentationPipeline {
                 self.context.CopyResource(&backbuffer, source_texture);
             }
 
-            // Present with vsync
-            let sync_interval = if self.config.vsync { 1 } else { 0 };
+            // Present with appropriate flags
+            let (sync_interval, present_flags) = self.get_present_params();
             unsafe {
-                swapchain.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
+                swapchain
+                    .Present(sync_interval, DXGI_PRESENT(present_flags))
+                    .ok()?;
             }
         }
 
@@ -371,6 +417,11 @@ impl PresentationPipeline {
             }
         }
 
+        // Update frame timing
+        self.update_frame_timing(frame_time);
+        self.last_present_time = now;
+        self.frame_count += 1;
+
         Ok(())
     }
 
@@ -383,6 +434,9 @@ impl PresentationPipeline {
         width: u32,
         height: u32,
     ) -> Result<()> {
+        let now = std::time::Instant::now();
+        let frame_time = now - self.last_present_time;
+
         let src_box = D3D11_BOX {
             left: src_x,
             top: src_y,
@@ -409,10 +463,12 @@ impl PresentationPipeline {
                 );
             }
 
-            // Present with vsync
-            let sync_interval = if self.config.vsync { 1 } else { 0 };
+            // Present with appropriate flags
+            let (sync_interval, present_flags) = self.get_present_params();
             unsafe {
-                swapchain.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
+                swapchain
+                    .Present(sync_interval, DXGI_PRESENT(present_flags))
+                    .ok()?;
             }
         }
 
@@ -439,6 +495,11 @@ impl PresentationPipeline {
             }
         }
 
+        // Update frame timing
+        self.update_frame_timing(frame_time);
+        self.last_present_time = now;
+        self.frame_count += 1;
+
         Ok(())
     }
 
@@ -458,13 +519,19 @@ impl PresentationPipeline {
 
         // Resize swapchain if exists
         if let Some(ref swapchain) = self.swapchain {
+            let flags = if self.config.allow_tearing && self.tearing_supported {
+                DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+            } else {
+                DXGI_SWAP_CHAIN_FLAG(0)
+            };
+
             unsafe {
                 swapchain.ResizeBuffers(
-                    2,
+                    self.config.buffer_count,
                     width,
                     height,
                     DXGI_FORMAT_R8G8B8A8_UNORM,
-                    DXGI_SWAP_CHAIN_FLAG(0),
+                    flags,
                 )?;
             }
 
@@ -551,6 +618,186 @@ impl PresentationPipeline {
     pub fn shared_texture(&self) -> Option<&ID3D11Texture2D> {
         self.shared_texture.as_ref()
     }
+
+    /// Get present parameters based on vsync and tearing settings
+    fn get_present_params(&self) -> (u32, u32) {
+        let use_tearing = self.config.allow_tearing && self.tearing_supported && !self.config.vsync;
+
+        if use_tearing {
+            // Allow tearing for immediate present (VRR)
+            (0, DXGI_PRESENT_ALLOW_TEARING.0)
+        } else if self.config.vsync {
+            // VSync on: sync interval 1
+            (1, 0)
+        } else {
+            // VSync off without tearing support: immediate present
+            (0, 0)
+        }
+    }
+
+    /// Update frame timing statistics
+    fn update_frame_timing(&mut self, frame_time: std::time::Duration) {
+        const MAX_SAMPLES: usize = 120;
+
+        self.frame_times.push(frame_time);
+        if self.frame_times.len() > MAX_SAMPLES {
+            self.frame_times.remove(0);
+        }
+    }
+
+    /// Get average FPS over the last N frames
+    pub fn average_fps(&self) -> f64 {
+        if self.frame_times.is_empty() {
+            return 0.0;
+        }
+
+        let total: std::time::Duration = self.frame_times.iter().sum();
+        let avg_frame_time = total.as_secs_f64() / self.frame_times.len() as f64;
+
+        if avg_frame_time > 0.0 {
+            1.0 / avg_frame_time
+        } else {
+            0.0
+        }
+    }
+
+    /// Get the last frame time in milliseconds
+    pub fn last_frame_time_ms(&self) -> f64 {
+        self.frame_times
+            .last()
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
+    }
+
+    /// Get frame count since pipeline creation
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+
+    /// Get frame timing statistics
+    pub fn frame_stats(&self) -> FrameStats {
+        if self.frame_times.is_empty() {
+            return FrameStats::default();
+        }
+
+        let total: std::time::Duration = self.frame_times.iter().sum();
+        let avg = total / self.frame_times.len() as u32;
+
+        let min = self.frame_times.iter().min().copied().unwrap_or_default();
+        let max = self.frame_times.iter().max().copied().unwrap_or_default();
+
+        let avg_secs = avg.as_secs_f64();
+        let fps = if avg_secs > 0.0 { 1.0 / avg_secs } else { 0.0 };
+
+        FrameStats {
+            fps,
+            avg_frame_time_ms: avg.as_secs_f64() * 1000.0,
+            min_frame_time_ms: min.as_secs_f64() * 1000.0,
+            max_frame_time_ms: max.as_secs_f64() * 1000.0,
+            frame_count: self.frame_count,
+        }
+    }
+
+    /// Set vsync mode at runtime
+    pub fn set_vsync(&mut self, enabled: bool) {
+        if self.config.vsync != enabled {
+            info!("VSync changed: {} -> {}", self.config.vsync, enabled);
+            self.config.vsync = enabled;
+        }
+    }
+
+    /// Set tearing (VRR) mode at runtime
+    pub fn set_allow_tearing(&mut self, enabled: bool) {
+        if self.config.allow_tearing != enabled {
+            if enabled && !self.tearing_supported {
+                info!("Tearing requested but not supported by display");
+            } else {
+                info!(
+                    "Tearing changed: {} -> {}",
+                    self.config.allow_tearing, enabled
+                );
+                self.config.allow_tearing = enabled;
+            }
+        }
+    }
+
+    /// Check if tearing (VRR) is supported
+    pub fn tearing_supported(&self) -> bool {
+        self.tearing_supported
+    }
+
+    /// Handle window resize from WM_SIZE message
+    /// Returns the new size if it changed
+    pub fn handle_window_resize(&mut self) -> Option<(u32, u32)> {
+        let hwnd = self.hwnd?;
+
+        let mut rect = RECT::default();
+        unsafe {
+            if windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect).is_err() {
+                return None;
+            }
+        }
+
+        let new_width = (rect.right - rect.left) as u32;
+        let new_height = (rect.bottom - rect.top) as u32;
+
+        if new_width > 0
+            && new_height > 0
+            && (new_width != self.config.width || new_height != self.config.height)
+        {
+            if let Err(e) = self.resize(new_width, new_height) {
+                tracing::error!("Failed to resize presentation: {}", e);
+                return None;
+            }
+            return Some((new_width, new_height));
+        }
+
+        None
+    }
+}
+
+/// Frame timing statistics
+#[derive(Debug, Clone, Default)]
+pub struct FrameStats {
+    /// Average frames per second
+    pub fps: f64,
+    /// Average frame time in milliseconds
+    pub avg_frame_time_ms: f64,
+    /// Minimum frame time in milliseconds (best frame)
+    pub min_frame_time_ms: f64,
+    /// Maximum frame time in milliseconds (worst frame)
+    pub max_frame_time_ms: f64,
+    /// Total frame count
+    pub frame_count: u64,
+}
+
+/// Check if the system supports tearing (DXGI_FEATURE_PRESENT_ALLOW_TEARING)
+fn check_tearing_support(device: &ID3D11Device) -> bool {
+    // Try to get IDXGIFactory5 which supports tearing query
+    let result: Result<bool, _> = (|| {
+        let dxgi_device: windows::Win32::Graphics::Dxgi::IDXGIDevice = device.cast()?;
+        let dxgi_adapter = unsafe { dxgi_device.GetAdapter()? };
+        let dxgi_factory: IDXGIFactory5 = unsafe { dxgi_adapter.GetParent()? };
+
+        let mut allow_tearing: windows::Win32::Foundation::BOOL = windows::Win32::Foundation::FALSE;
+        unsafe {
+            dxgi_factory.CheckFeatureSupport(
+                DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                &mut allow_tearing as *mut _ as *mut _,
+                std::mem::size_of::<windows::Win32::Foundation::BOOL>() as u32,
+            )?;
+        }
+
+        Ok::<bool, windows::core::Error>(allow_tearing.as_bool())
+    })();
+
+    match result {
+        Ok(supported) => supported,
+        Err(_) => {
+            debug!("DXGI 1.5 not available, tearing not supported");
+            false
+        }
+    }
 }
 
 impl Drop for PresentationPipeline {
@@ -630,5 +877,14 @@ mod tests {
         assert_eq!(config.height, 1080);
         assert!(config.vsync);
         assert_eq!(config.mode, PresentationMode::Windowed);
+        assert_eq!(config.buffer_count, 2);
+        assert!(!config.allow_tearing);
+    }
+
+    #[test]
+    fn test_frame_stats_default() {
+        let stats = FrameStats::default();
+        assert_eq!(stats.fps, 0.0);
+        assert_eq!(stats.frame_count, 0);
     }
 }

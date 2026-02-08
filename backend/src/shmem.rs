@@ -17,6 +17,29 @@ use windows::Win32::System::Memory::{
 
 use crate::protocol::{ControlRegion, PVGPU_MAGIC, PVGPU_VERSION_MAJOR};
 
+/// Result of reading pending commands from the ring buffer.
+/// Can either be a direct reference to contiguous ring data,
+/// or an owned copy when the command straddles the wrap boundary.
+pub enum RingData<'a> {
+    /// Direct reference into the ring buffer (no copy needed)
+    Contiguous(&'a [u8]),
+    /// Owned copy spanning the ring wrap boundary
+    Wrapped(Vec<u8>),
+}
+
+impl<'a> RingData<'a> {
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            RingData::Contiguous(s) => s,
+            RingData::Wrapped(v) => v.as_slice(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+}
+
 /// Shared memory region mapped from QEMU
 pub struct SharedMemory {
     /// Handle to the file mapping object
@@ -164,9 +187,14 @@ impl SharedMemory {
         slice::from_raw_parts_mut(self.base_addr.add(offset), size)
     }
 
-    /// Read commands from the ring buffer starting at the consumer pointer
-    /// Returns the data slice and the number of pending bytes
-    pub fn read_pending_commands(&self) -> Option<(&[u8], u64)> {
+    /// Read commands from the ring buffer starting at the consumer pointer.
+    ///
+    /// Returns either a direct slice into the ring (fast path, no copy) when the
+    /// next command is fully contiguous, or an owned Vec when the command straddles
+    /// the ring wrap boundary.
+    ///
+    /// Returns None when there are no pending commands.
+    pub fn read_pending_commands(&self) -> Option<(RingData<'_>, u64)> {
         let control = self.control_region();
         let pending = control.pending_bytes();
 
@@ -180,9 +208,50 @@ impl SharedMemory {
 
         // Calculate offset within ring (wrap around)
         let offset = (consumer % ring_size) as usize;
-        let available = std::cmp::min(pending as usize, ring.len() - offset);
+        let contiguous = ring.len() - offset; // bytes available before wrap
 
-        Some((&ring[offset..offset + available], pending))
+        if pending as usize <= contiguous {
+            // Fast path: all pending data fits in contiguous region
+            let available = pending as usize;
+            Some((
+                RingData::Contiguous(&ring[offset..offset + available]),
+                pending,
+            ))
+        } else {
+            // Command straddles the wrap boundary — we need to assemble it.
+            // We need at least a command header (8 bytes) to know the command size.
+            // Read the header, potentially across the wrap boundary.
+            use crate::protocol::{CommandHeader, PVGPU_CMD_HEADER_SIZE};
+
+            if (pending as usize) < PVGPU_CMD_HEADER_SIZE {
+                // Not enough data for even a header — shouldn't happen in practice
+                return None;
+            }
+
+            // Read the header (may straddle wrap)
+            let mut header_bytes = [0u8; 8]; // PVGPU_CMD_HEADER_SIZE = 8
+            for (i, byte) in header_bytes.iter_mut().enumerate() {
+                let idx = (offset + i) % ring.len();
+                *byte = ring[idx];
+            }
+            let header: CommandHeader =
+                unsafe { std::ptr::read_unaligned(header_bytes.as_ptr() as *const CommandHeader) };
+
+            let cmd_size = header.command_size as usize;
+            if cmd_size > pending as usize || cmd_size < PVGPU_CMD_HEADER_SIZE {
+                // Malformed command or not enough data yet
+                return None;
+            }
+
+            // Copy the full command (spanning wrap) into a contiguous buffer
+            let mut buf = vec![0u8; cmd_size];
+            for (i, byte) in buf.iter_mut().enumerate() {
+                let idx = (offset + i) % ring.len();
+                *byte = ring[idx];
+            }
+
+            Some((RingData::Wrapped(buf), pending))
+        }
     }
 
     /// Advance the consumer pointer after processing commands

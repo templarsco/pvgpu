@@ -39,8 +39,10 @@ extern "C" {
 #define PVGPU_UMD_MAX_SHADER_RESOURCES  128
 #define PVGPU_UMD_MAX_CONSTANT_BUFFERS  14
 
-/* Command buffer size (must match KMD expectations) */
-#define PVGPU_UMD_COMMAND_BUFFER_SIZE   (64 * 1024)
+/* Command staging buffer size.
+ * Larger buffer = fewer ring flushes + fewer doorbell KMD escapes.
+ * 256KB fits ~4000-8000 typical commands before a flush is needed. */
+#define PVGPU_UMD_COMMAND_BUFFER_SIZE   (256 * 1024)
 
 /* ============================================================================
  * Resource Tracking
@@ -92,6 +94,8 @@ typedef struct PVGPU_UMD_RESOURCE {
     BOOL                IsMapped;
     void*               MappedAddress;
     SIZE_T              MappedSize;
+    BOOL                IsShared;       /* Opened via OpenResource */
+    D3D10DDI_HRTRESOURCE hRTResource;  /* Runtime handle */
 } PVGPU_UMD_RESOURCE;
 
 /* Shader tracking */
@@ -101,6 +105,63 @@ typedef struct PVGPU_UMD_SHADER {
     SIZE_T              BytecodeSize;
     void*               Bytecode;       /* Keep a copy for debugging */
 } PVGPU_UMD_SHADER;
+
+/* Blend state tracking */
+typedef struct PVGPU_UMD_BLEND_STATE {
+    UINT32              HostHandle;
+    BOOL                AlphaToCoverageEnable;
+    BOOL                IndependentBlendEnable;
+} PVGPU_UMD_BLEND_STATE;
+
+/* Rasterizer state tracking */
+typedef struct PVGPU_UMD_RASTERIZER_STATE {
+    UINT32              HostHandle;
+    UINT32              FillMode;
+    UINT32              CullMode;
+} PVGPU_UMD_RASTERIZER_STATE;
+
+/* Depth stencil state tracking */
+typedef struct PVGPU_UMD_DEPTH_STENCIL_STATE {
+    UINT32              HostHandle;
+    BOOL                DepthEnable;
+    BOOL                StencilEnable;
+} PVGPU_UMD_DEPTH_STENCIL_STATE;
+
+/* Sampler state tracking */
+typedef struct PVGPU_UMD_SAMPLER {
+    UINT32              HostHandle;
+    UINT32              Filter;
+    UINT32              AddressU;
+    UINT32              AddressV;
+    UINT32              AddressW;
+} PVGPU_UMD_SAMPLER;
+
+/* Input layout tracking */
+typedef struct PVGPU_UMD_INPUT_LAYOUT {
+    UINT32              HostHandle;
+    UINT32              NumElements;
+} PVGPU_UMD_INPUT_LAYOUT;
+
+/* Render target view tracking */
+typedef struct PVGPU_UMD_RENDER_TARGET_VIEW {
+    UINT32              HostHandle;
+    UINT32              ResourceHandle; /* The underlying resource */
+    DXGI_FORMAT         Format;
+} PVGPU_UMD_RENDER_TARGET_VIEW;
+
+/* Depth stencil view tracking */
+typedef struct PVGPU_UMD_DEPTH_STENCIL_VIEW {
+    UINT32              HostHandle;
+    UINT32              ResourceHandle;
+    DXGI_FORMAT         Format;
+} PVGPU_UMD_DEPTH_STENCIL_VIEW;
+
+/* Shader resource view tracking */
+typedef struct PVGPU_UMD_SHADER_RESOURCE_VIEW {
+    UINT32              HostHandle;
+    UINT32              ResourceHandle;
+    DXGI_FORMAT         Format;
+} PVGPU_UMD_SHADER_RESOURCE_VIEW;
 
 /* ============================================================================
  * Device Context
@@ -121,10 +182,30 @@ typedef struct PVGPU_UMD_DEVICE {
     /* Adapter back-reference */
     struct PVGPU_UMD_ADAPTER*       pAdapter;
     
-    /* Command buffer management */
-    UINT8*                          pCommandBuffer;
-    SIZE_T                          CommandBufferSize;
-    SIZE_T                          CommandBufferOffset;
+    /* Shared memory access (obtained via KMD escape) */
+    void*                           pSharedMemory;      /* Base address of shared memory */
+    SIZE_T                          SharedMemorySize;   /* Total shared memory size */
+    PvgpuControlRegion*             pControlRegion;     /* Pointer to control region */
+    UINT8*                          pRingBuffer;        /* Pointer to command ring */
+    SIZE_T                          RingBufferSize;     /* Ring buffer size */
+    UINT8*                          pHeap;              /* Pointer to resource heap */
+    SIZE_T                          HeapSize;           /* Heap size */
+    SIZE_T                          HeapOffset;         /* Heap start offset from shmem base */
+    UINT64                          NegotiatedFeatures; /* Feature flags */
+    BOOL                            SharedMemoryValid;  /* TRUE if shmem is mapped */
+    BOOL                            BackendConnected;   /* TRUE if backend is responsive */
+    
+    /* Ring buffer producer tracking */
+    UINT64                          LocalProducerPtr;   /* UMD's view of producer pointer */
+    UINT64                          LastFenceSubmitted; /* Last fence value we submitted */
+    UINT64                          NextFenceValue;     /* Next fence value to use */
+    UINT64                          LastPresentFence;   /* Fence from previous present (for async double-buffer) */
+    CRITICAL_SECTION                RingLock;           /* Lock for ring buffer access */
+    
+    /* Staging buffer for command batching (before ring submission) */
+    UINT8*                          pStagingBuffer;     /* Local staging buffer */
+    SIZE_T                          StagingBufferSize;  /* Staging buffer capacity */
+    SIZE_T                          StagingOffset;      /* Current write offset */
     
     /* Resource tracking */
     PVGPU_UMD_RESOURCE*             pResources;
@@ -312,6 +393,22 @@ void APIENTRY PvgpuCreateGeometryShader(
     _In_ CONST D3D10DDIARG_STAGE_IO_SIGNATURES* pSignatures
 );
 
+void APIENTRY PvgpuCreateHullShader(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST UINT* pCode,
+    _In_ D3D10DDI_HSHADER hShader,
+    _In_ D3D10DDI_HRTSHADER hRTShader,
+    _In_ CONST D3D11_1DDIARG_TESSELLATION_IO_SIGNATURES* pSignatures
+);
+
+void APIENTRY PvgpuCreateDomainShader(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST UINT* pCode,
+    _In_ D3D10DDI_HSHADER hShader,
+    _In_ D3D10DDI_HRTSHADER hRTShader,
+    _In_ CONST D3D11_1DDIARG_TESSELLATION_IO_SIGNATURES* pSignatures
+);
+
 void APIENTRY PvgpuDestroyShader(
     _In_ D3D10DDI_HDEVICE hDevice,
     _In_ D3D10DDI_HSHADER hShader
@@ -358,6 +455,16 @@ void APIENTRY PvgpuPsSetShader(
 );
 
 void APIENTRY PvgpuGsSetShader(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HSHADER hShader
+);
+
+void APIENTRY PvgpuHsSetShader(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HSHADER hShader
+);
+
+void APIENTRY PvgpuDsSetShader(
     _In_ D3D10DDI_HDEVICE hDevice,
     _In_ D3D10DDI_HSHADER hShader
 );
@@ -519,6 +626,264 @@ void APIENTRY PvgpuBlt(
     _In_ DXGI_DDI_ARG_BLT* pBltData
 );
 
+HRESULT APIENTRY PvgpuResizeBuffers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ DXGI_DDI_ARG_RESIZEBUFFERS* pResizeData
+);
+
+/* ============================================================================
+ * State Object Creation
+ * ============================================================================ */
+
+SIZE_T APIENTRY PvgpuCalcPrivateBlendStateSize(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10_DDI_BLEND_DESC* pBlendDesc
+);
+
+void APIENTRY PvgpuCreateBlendState(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10_DDI_BLEND_DESC* pBlendDesc,
+    _In_ D3D10DDI_HBLENDSTATE hBlendState,
+    _In_ D3D10DDI_HRTBLENDSTATE hRTBlendState
+);
+
+void APIENTRY PvgpuDestroyBlendState(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HBLENDSTATE hBlendState
+);
+
+SIZE_T APIENTRY PvgpuCalcPrivateRasterizerStateSize(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10_DDI_RASTERIZER_DESC* pRasterizerDesc
+);
+
+void APIENTRY PvgpuCreateRasterizerState(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10_DDI_RASTERIZER_DESC* pRasterizerDesc,
+    _In_ D3D10DDI_HRASTERIZERSTATE hRasterizerState,
+    _In_ D3D10DDI_HRTRASTERIZERSTATE hRTRasterizerState
+);
+
+void APIENTRY PvgpuDestroyRasterizerState(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HRASTERIZERSTATE hRasterizerState
+);
+
+SIZE_T APIENTRY PvgpuCalcPrivateDepthStencilStateSize(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10_DDI_DEPTH_STENCIL_DESC* pDepthStencilDesc
+);
+
+void APIENTRY PvgpuCreateDepthStencilState(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10_DDI_DEPTH_STENCIL_DESC* pDepthStencilDesc,
+    _In_ D3D10DDI_HDEPTHSTENCILSTATE hDepthStencilState,
+    _In_ D3D10DDI_HRTDEPTHSTENCILSTATE hRTDepthStencilState
+);
+
+void APIENTRY PvgpuDestroyDepthStencilState(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HDEPTHSTENCILSTATE hDepthStencilState
+);
+
+SIZE_T APIENTRY PvgpuCalcPrivateSamplerSize(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10_DDI_SAMPLER_DESC* pSamplerDesc
+);
+
+void APIENTRY PvgpuCreateSampler(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10_DDI_SAMPLER_DESC* pSamplerDesc,
+    _In_ D3D10DDI_HSAMPLER hSampler,
+    _In_ D3D10DDI_HRTSAMPLER hRTSampler
+);
+
+void APIENTRY PvgpuDestroySampler(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HSAMPLER hSampler
+);
+
+SIZE_T APIENTRY PvgpuCalcPrivateElementLayoutSize(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10DDIARG_CREATEELEMENTLAYOUT* pCreateElementLayout
+);
+
+void APIENTRY PvgpuCreateElementLayout(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10DDIARG_CREATEELEMENTLAYOUT* pCreateElementLayout,
+    _In_ D3D10DDI_HELEMENTLAYOUT hElementLayout,
+    _In_ D3D10DDI_HRTELEMENTLAYOUT hRTElementLayout
+);
+
+void APIENTRY PvgpuDestroyElementLayout(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HELEMENTLAYOUT hElementLayout
+);
+
+/* ============================================================================
+ * View Creation
+ * ============================================================================ */
+
+SIZE_T APIENTRY PvgpuCalcPrivateRenderTargetViewSize(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10DDIARG_CREATERENDERTARGETVIEW* pCreateRenderTargetView
+);
+
+void APIENTRY PvgpuCreateRenderTargetView(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10DDIARG_CREATERENDERTARGETVIEW* pCreateRenderTargetView,
+    _In_ D3D10DDI_HRENDERTARGETVIEW hRenderTargetView,
+    _In_ D3D10DDI_HRTRENDERTARGETVIEW hRTRenderTargetView
+);
+
+void APIENTRY PvgpuDestroyRenderTargetView(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HRENDERTARGETVIEW hRenderTargetView
+);
+
+SIZE_T APIENTRY PvgpuCalcPrivateDepthStencilViewSize(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10DDIARG_CREATEDEPTHSTENCILVIEW* pCreateDepthStencilView
+);
+
+void APIENTRY PvgpuCreateDepthStencilView(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10DDIARG_CREATEDEPTHSTENCILVIEW* pCreateDepthStencilView,
+    _In_ D3D10DDI_HDEPTHSTENCILVIEW hDepthStencilView,
+    _In_ D3D10DDI_HRTDEPTHSTENCILVIEW hRTDepthStencilView
+);
+
+void APIENTRY PvgpuDestroyDepthStencilView(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HDEPTHSTENCILVIEW hDepthStencilView
+);
+
+SIZE_T APIENTRY PvgpuCalcPrivateShaderResourceViewSize(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10DDIARG_CREATESHADERRESOURCEVIEW* pCreateShaderResourceView
+);
+
+void APIENTRY PvgpuCreateShaderResourceView(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ CONST D3D10DDIARG_CREATESHADERRESOURCEVIEW* pCreateShaderResourceView,
+    _In_ D3D10DDI_HSHADERRESOURCEVIEW hShaderResourceView,
+    _In_ D3D10DDI_HRTSHADERRESOURCEVIEW hRTShaderResourceView
+);
+
+void APIENTRY PvgpuDestroyShaderResourceView(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ D3D10DDI_HSHADERRESOURCEVIEW hShaderResourceView
+);
+
+/* ============================================================================
+ * Constant Buffers and Shader Resources Binding
+ * ============================================================================ */
+
+void APIENTRY PvgpuVsSetConstantBuffers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT StartBuffer,
+    _In_ UINT NumBuffers,
+    _In_reads_(NumBuffers) CONST D3D10DDI_HRESOURCE* phBuffers
+);
+
+void APIENTRY PvgpuPsSetConstantBuffers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT StartBuffer,
+    _In_ UINT NumBuffers,
+    _In_reads_(NumBuffers) CONST D3D10DDI_HRESOURCE* phBuffers
+);
+
+void APIENTRY PvgpuGsSetConstantBuffers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT StartBuffer,
+    _In_ UINT NumBuffers,
+    _In_reads_(NumBuffers) CONST D3D10DDI_HRESOURCE* phBuffers
+);
+
+void APIENTRY PvgpuHsSetConstantBuffers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT StartBuffer,
+    _In_ UINT NumBuffers,
+    _In_reads_(NumBuffers) CONST D3D10DDI_HRESOURCE* phBuffers
+);
+
+void APIENTRY PvgpuDsSetConstantBuffers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT StartBuffer,
+    _In_ UINT NumBuffers,
+    _In_reads_(NumBuffers) CONST D3D10DDI_HRESOURCE* phBuffers
+);
+
+void APIENTRY PvgpuVsSetShaderResources(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumViews,
+    _In_reads_(NumViews) CONST D3D10DDI_HSHADERRESOURCEVIEW* phShaderResourceViews
+);
+
+void APIENTRY PvgpuPsSetShaderResources(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumViews,
+    _In_reads_(NumViews) CONST D3D10DDI_HSHADERRESOURCEVIEW* phShaderResourceViews
+);
+
+void APIENTRY PvgpuGsSetShaderResources(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumViews,
+    _In_reads_(NumViews) CONST D3D10DDI_HSHADERRESOURCEVIEW* phShaderResourceViews
+);
+
+void APIENTRY PvgpuHsSetShaderResources(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumViews,
+    _In_reads_(NumViews) CONST D3D10DDI_HSHADERRESOURCEVIEW* phShaderResourceViews
+);
+
+void APIENTRY PvgpuDsSetShaderResources(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumViews,
+    _In_reads_(NumViews) CONST D3D10DDI_HSHADERRESOURCEVIEW* phShaderResourceViews
+);
+
+void APIENTRY PvgpuVsSetSamplers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumSamplers,
+    _In_reads_(NumSamplers) CONST D3D10DDI_HSAMPLER* phSamplers
+);
+
+void APIENTRY PvgpuPsSetSamplers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumSamplers,
+    _In_reads_(NumSamplers) CONST D3D10DDI_HSAMPLER* phSamplers
+);
+
+void APIENTRY PvgpuGsSetSamplers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumSamplers,
+    _In_reads_(NumSamplers) CONST D3D10DDI_HSAMPLER* phSamplers
+);
+
+void APIENTRY PvgpuHsSetSamplers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumSamplers,
+    _In_reads_(NumSamplers) CONST D3D10DDI_HSAMPLER* phSamplers
+);
+
+void APIENTRY PvgpuDsSetSamplers(
+    _In_ D3D10DDI_HDEVICE hDevice,
+    _In_ UINT Offset,
+    _In_ UINT NumSamplers,
+    _In_reads_(NumSamplers) CONST D3D10DDI_HSAMPLER* phSamplers
+);
+
 /* ============================================================================
  * Command Buffer Helpers
  * ============================================================================ */
@@ -545,6 +910,49 @@ UINT32 PvgpuAllocateResourceHandle(
 PVGPU_UMD_RESOURCE* PvgpuGetResource(
     _In_ PVGPU_UMD_DEVICE* pDevice,
     _In_ D3D10DDI_HRESOURCE hResource
+);
+
+/* ============================================================================
+ * KMD Escape Helpers
+ * ============================================================================ */
+
+/* Call KMD escape interface */
+HRESULT PvgpuEscape(
+    _In_ PVGPU_UMD_DEVICE* pDevice,
+    _Inout_ void* pEscapeData,
+    _In_ SIZE_T EscapeDataSize
+);
+
+/* Initialize shared memory access via KMD escape */
+HRESULT PvgpuInitSharedMemory(
+    _In_ PVGPU_UMD_DEVICE* pDevice
+);
+
+/* Allocate from shared memory heap via KMD */
+HRESULT PvgpuHeapAlloc(
+    _In_ PVGPU_UMD_DEVICE* pDevice,
+    _In_ UINT32 Size,
+    _In_ UINT32 Alignment,
+    _Out_ UINT32* pOffset
+);
+
+/* Free shared memory heap allocation via KMD */
+HRESULT PvgpuHeapFree(
+    _In_ PVGPU_UMD_DEVICE* pDevice,
+    _In_ UINT32 Offset,
+    _In_ UINT32 Size
+);
+
+/* Ring the doorbell to notify host of new commands */
+HRESULT PvgpuRingDoorbell(
+    _In_ PVGPU_UMD_DEVICE* pDevice
+);
+
+/* Wait for a fence value to complete */
+HRESULT PvgpuWaitFence(
+    _In_ PVGPU_UMD_DEVICE* pDevice,
+    _In_ UINT64 FenceValue,
+    _In_ UINT32 TimeoutMs
 );
 
 #ifdef __cplusplus

@@ -18,13 +18,74 @@
 #include "../../protocol/pvgpu_protocol.h"
 
 /*
- * =============================================================================
- * Driver Constants
- * =============================================================================
- */
+00024|  * =============================================================================
+00025|  * Driver Constants
+00026|  * =============================================================================
+00027|  */
 
 #define PVGPU_POOL_TAG          'UPGV'  /* "VGPU" backwards */
 #define PVGPU_DRIVER_VERSION    0x0001
+
+/* Heap allocator constants */
+#define PVGPU_HEAP_BLOCK_SIZE   0x1000      /* 4KB minimum block */
+#define PVGPU_HEAP_MAX_BLOCKS   4096        /* Max blocks (for 16MB heap at 4KB blocks) */
+
+/* Display mode constants */
+#define PVGPU_MAX_DISPLAY_MODES     16      /* Maximum supported display modes */
+#define PVGPU_DEFAULT_REFRESH_RATE  60      /* Default refresh rate in Hz */
+
+/*
+ * =============================================================================
+ * Display Mode Definition
+ * =============================================================================
+ */
+
+typedef struct _PVGPU_DISPLAY_MODE {
+    ULONG   Width;              /* Horizontal resolution */
+    ULONG   Height;             /* Vertical resolution */
+    ULONG   RefreshRate;        /* Refresh rate in Hz */
+    BOOLEAN Active;             /* Mode is currently active */
+} PVGPU_DISPLAY_MODE, *PPVGPU_DISPLAY_MODE;
+
+/* Standard display modes table */
+static const PVGPU_DISPLAY_MODE g_DisplayModes[] = {
+    /* 16:9 resolutions */
+    { 1280,  720,  60, FALSE },     /* 720p */
+    { 1280,  720, 120, FALSE },
+    { 1920, 1080,  60, FALSE },     /* 1080p */
+    { 1920, 1080, 120, FALSE },
+    { 1920, 1080, 144, FALSE },
+    { 2560, 1440,  60, FALSE },     /* 1440p */
+    { 2560, 1440, 120, FALSE },
+    { 2560, 1440, 144, FALSE },
+    { 3840, 2160,  60, FALSE },     /* 4K */
+    { 3840, 2160, 120, FALSE },
+    /* 16:10 resolutions */
+    { 1920, 1200,  60, FALSE },     /* WUXGA */
+    { 2560, 1600,  60, FALSE },     /* WQXGA */
+    /* 4:3 resolutions */
+    { 1024,  768,  60, FALSE },     /* XGA */
+    { 1600, 1200,  60, FALSE },     /* UXGA */
+};
+
+#define PVGPU_NUM_DISPLAY_MODES (sizeof(g_DisplayModes) / sizeof(g_DisplayModes[0]))
+
+/*
+ * =============================================================================
+ * Heap Allocator (Simple bitmap-based)
+ * =============================================================================
+ */
+
+typedef struct _PVGPU_HEAP_ALLOCATOR {
+    ULONG       BlockSize;          /* Size of each block */
+    ULONG       NumBlocks;          /* Total number of blocks */
+    ULONG       FreeBlocks;         /* Number of free blocks */
+    ULONG       HeapOffset;         /* Offset of heap in shared memory */
+    ULONG       HeapSize;           /* Total heap size */
+    RTL_BITMAP  Bitmap;             /* Allocation bitmap */
+    PULONG      BitmapBuffer;       /* Buffer for bitmap */
+    KSPIN_LOCK  Lock;               /* Lock for allocation */
+} PVGPU_HEAP_ALLOCATOR, *PPVGPU_HEAP_ALLOCATOR;
 
 /*
  * =============================================================================
@@ -58,6 +119,9 @@ typedef struct _PVGPU_DEVICE_CONTEXT {
     /* Resource heap base (after command ring) */
     volatile UCHAR*             ResourceHeap;
     ULONG                       ResourceHeapSize;
+    
+    /* Heap allocator for UMD allocations */
+    PVGPU_HEAP_ALLOCATOR        HeapAllocator;
     
     /* Interrupt state */
     ULONG                       InterruptMessageNumber;
@@ -244,6 +308,62 @@ NTSTATUS
 PvgpuRender(
     _In_ PVOID MiniportDeviceContext,
     _Inout_ DXGKARG_RENDER* Render
+);
+
+/* Escape (UMD <-> KMD communication) */
+NTSTATUS
+PvgpuEscape(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_ESCAPE* Escape
+);
+
+/* VidPn Functions (Display Mode Enumeration) */
+NTSTATUS
+PvgpuIsSupportedVidPn(
+    _In_ PVOID MiniportDeviceContext,
+    _Inout_ DXGKARG_ISSUPPORTEDVIDPN* IsSupportedVidPn
+);
+
+NTSTATUS
+PvgpuRecommendFunctionalVidPn(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_RECOMMENDFUNCTIONALVIDPN* RecommendFunctionalVidPn
+);
+
+NTSTATUS
+PvgpuEnumVidPnCofuncModality(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_ENUMVIDPNCOFUNCMODALITY* EnumCofuncModality
+);
+
+NTSTATUS
+PvgpuSetVidPnSourceAddress(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_SETVIDPNSOURCEADDRESS* SetVidPnSourceAddress
+);
+
+NTSTATUS
+PvgpuSetVidPnSourceVisibility(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_SETVIDPNSOURCEVISIBILITY* SetVidPnSourceVisibility
+);
+
+NTSTATUS
+PvgpuCommitVidPn(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_COMMITVIDPN* CommitVidPn
+);
+
+NTSTATUS
+PvgpuUpdateActiveVidPnPresentPath(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_UPDATEACTIVEVIDPNPRESENTPATH* UpdateActiveVidPnPresentPath
+);
+
+NTSTATUS
+PvgpuRecommendMonitorModes(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_RECOMMENDMONITORMODES* RecommendMonitorModes
 );
 
 /*

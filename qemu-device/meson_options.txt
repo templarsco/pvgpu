@@ -1,0 +1,4 @@
+# Meson options for pvgpu standalone build
+
+option('standalone_check', type: 'boolean', value: false,
+       description: 'Enable standalone syntax checking (no QEMU headers)')

@@ -90,6 +90,7 @@ extern "C" {
 
 /* MVP features */
 #define PVGPU_FEATURES_MVP          (PVGPU_FEATURE_D3D11 | PVGPU_FEATURE_COMPUTE | \
+                                     PVGPU_FEATURE_GEOMETRY | PVGPU_FEATURE_TESSELLATION | \
                                      PVGPU_FEATURE_VSYNC)
 
 /*
@@ -109,28 +110,32 @@ typedef struct PvgpuControlRegion {
     /* 0x018 */ uint32_t heap_offset;           /* Resource heap offset from shmem base */
     /* 0x01C */ uint32_t heap_size;             /* Resource heap size in bytes */
     
-    /* Producer-consumer pointers (atomics) */
+    /* Producer-consumer pointers (each on its own 64-byte cache line to prevent false sharing) */
     /* 0x020 */ volatile uint64_t producer_ptr; /* Written by guest */
-    /* 0x028 */ volatile uint64_t consumer_ptr; /* Written by host */
+    /*       */ uint8_t _pad_producer[56];      /* Pad to cache line boundary */
+    /* 0x060 */ volatile uint64_t consumer_ptr; /* Written by host */
+    /*       */ uint8_t _pad_consumer[56];      /* Pad to cache line boundary */
     
-    /* Fence synchronization */
-    /* 0x030 */ volatile uint64_t guest_fence_request;    /* Latest fence requested by guest */
-    /* 0x038 */ volatile uint64_t host_fence_completed;   /* Latest fence completed by host */
+    /* Fence synchronization (each on its own cache line) */
+    /* 0x0A0 */ volatile uint64_t guest_fence_request;    /* Latest fence requested by guest */
+    /*       */ uint8_t _pad_guest_fence[56];              /* Pad to cache line boundary */
+    /* 0x0E0 */ volatile uint64_t host_fence_completed;   /* Latest fence completed by host */
+    /*       */ uint8_t _pad_host_fence[56];               /* Pad to cache line boundary */
     
     /* Status and error reporting */
-    /* 0x040 */ volatile uint32_t status;       /* Device status flags */
-    /* 0x044 */ volatile uint32_t error_code;   /* Last error code */
-    /* 0x048 */ volatile uint32_t error_data;   /* Additional error info */
-    /* 0x04C */ uint32_t reserved1;
+    /* 0x120 */ volatile uint32_t status;       /* Device status flags */
+    /* 0x124 */ volatile uint32_t error_code;   /* Last error code */
+    /* 0x128 */ volatile uint32_t error_data;   /* Additional error info */
+    /* 0x12C */ uint32_t reserved1;
     
     /* Display configuration */
-    /* 0x050 */ uint32_t display_width;         /* Current display width */
-    /* 0x054 */ uint32_t display_height;        /* Current display height */
-    /* 0x058 */ uint32_t display_refresh;       /* Refresh rate in Hz */
-    /* 0x05C */ uint32_t display_format;        /* DXGI_FORMAT value */
+    /* 0x130 */ uint32_t display_width;         /* Current display width */
+    /* 0x134 */ uint32_t display_height;        /* Current display height */
+    /* 0x138 */ uint32_t display_refresh;       /* Refresh rate in Hz */
+    /* 0x13C */ uint32_t display_format;        /* DXGI_FORMAT value */
     
     /* Reserved for future use */
-    /* 0x060 */ uint8_t reserved[0xFA0];        /* Pad to 4KB total */
+    /* 0x140 */ uint8_t reserved[0xEC0];        /* Pad to 4KB total */
 } PvgpuControlRegion;
 
 _Static_assert(sizeof(PvgpuControlRegion) == PVGPU_CONTROL_REGION_SIZE, 
@@ -168,6 +173,33 @@ typedef struct PvgpuCommandHeader {
 #define PVGPU_CMD_UNMAP_RESOURCE        0x0004
 #define PVGPU_CMD_UPDATE_RESOURCE       0x0005
 #define PVGPU_CMD_COPY_RESOURCE         0x0006
+#define PVGPU_CMD_OPEN_RESOURCE         0x0007
+
+/* State object creation commands: 0x0010 - 0x002F */
+#define PVGPU_CMD_CREATE_BLEND_STATE        0x0010
+#define PVGPU_CMD_DESTROY_BLEND_STATE       0x0011
+#define PVGPU_CMD_CREATE_RASTERIZER_STATE   0x0012
+#define PVGPU_CMD_DESTROY_RASTERIZER_STATE  0x0013
+#define PVGPU_CMD_CREATE_DEPTH_STENCIL_STATE 0x0014
+#define PVGPU_CMD_DESTROY_DEPTH_STENCIL_STATE 0x0015
+#define PVGPU_CMD_CREATE_SAMPLER            0x0016
+#define PVGPU_CMD_DESTROY_SAMPLER           0x0017
+#define PVGPU_CMD_CREATE_INPUT_LAYOUT       0x0018
+#define PVGPU_CMD_DESTROY_INPUT_LAYOUT      0x0019
+
+/* View creation commands: 0x0020 - 0x002F */
+#define PVGPU_CMD_CREATE_RENDER_TARGET_VIEW     0x0020
+#define PVGPU_CMD_DESTROY_RENDER_TARGET_VIEW    0x0021
+#define PVGPU_CMD_CREATE_DEPTH_STENCIL_VIEW     0x0022
+#define PVGPU_CMD_DESTROY_DEPTH_STENCIL_VIEW    0x0023
+#define PVGPU_CMD_CREATE_SHADER_RESOURCE_VIEW   0x0024
+#define PVGPU_CMD_DESTROY_SHADER_RESOURCE_VIEW  0x0025
+#define PVGPU_CMD_CREATE_UNORDERED_ACCESS_VIEW  0x0026
+#define PVGPU_CMD_DESTROY_UNORDERED_ACCESS_VIEW 0x0027
+
+/* Shader creation commands: 0x0030 - 0x003F */
+#define PVGPU_CMD_CREATE_SHADER             0x0030
+#define PVGPU_CMD_DESTROY_SHADER            0x0031
 
 /* State commands: 0x0100 - 0x01FF */
 #define PVGPU_CMD_SET_RENDER_TARGET     0x0101
@@ -199,6 +231,7 @@ typedef struct PvgpuCommandHeader {
 #define PVGPU_CMD_PRESENT               0x0302
 #define PVGPU_CMD_FLUSH                 0x0303
 #define PVGPU_CMD_WAIT_FENCE            0x0304
+#define PVGPU_CMD_RESIZE_BUFFERS        0x0305
 
 /*
  * =============================================================================
@@ -278,22 +311,54 @@ typedef struct PvgpuCmdDestroyResource {
     /* resource_id in header specifies which resource */
 } PvgpuCmdDestroyResource;
 
+/* CMD_OPEN_RESOURCE payload - opens a shared resource by global handle */
+typedef struct PvgpuCmdOpenResource {
+    PvgpuCommandHeader header;
+    uint32_t shared_handle;         /* Global shared resource handle (NT or KMT) */
+    uint32_t resource_type;         /* PvgpuResourceType */
+    uint32_t format;                /* DXGI_FORMAT */
+    uint32_t width;
+    uint32_t height;
+    uint32_t bind_flags;            /* PVGPU_BIND_* flags */
+    uint32_t misc_flags;
+} PvgpuCmdOpenResource;
+
 /* CMD_MAP_RESOURCE payload */
 typedef struct PvgpuCmdMapResource {
     PvgpuCommandHeader header;
+    uint32_t resource_id;           /* Resource to map (in header) */
     uint32_t subresource;           /* Subresource index */
     uint32_t map_type;              /* Map type (read, write, etc.) */
+    uint32_t map_flags;             /* Map flags */
     uint32_t heap_offset;           /* Where in heap to map data */
-    uint32_t reserved;
+    uint32_t reserved[3];
 } PvgpuCmdMapResource;
+
+/* Map types (matches D3D11_MAP) */
+#define PVGPU_MAP_READ              1
+#define PVGPU_MAP_WRITE             2
+#define PVGPU_MAP_READ_WRITE        3
+#define PVGPU_MAP_WRITE_DISCARD     4
+#define PVGPU_MAP_WRITE_NO_OVERWRITE 5
+
+/* CMD_UNMAP_RESOURCE payload */
+typedef struct PvgpuCmdUnmapResource {
+    PvgpuCommandHeader header;
+    uint32_t resource_id;           /* Resource to unmap (in header) */
+    uint32_t subresource;           /* Subresource index */
+    uint32_t heap_offset;           /* Where the data was mapped */
+    uint32_t data_size;             /* Size of data to copy back (for write maps) */
+} PvgpuCmdUnmapResource;
 
 /* CMD_UPDATE_RESOURCE payload */
 typedef struct PvgpuCmdUpdateResource {
     PvgpuCommandHeader header;
+    uint32_t resource_id;           /* Resource to update (in header) */
     uint32_t subresource;           /* Subresource index */
-    uint32_t dst_x, dst_y, dst_z;   /* Destination offset */
-    uint32_t width, height, depth;  /* Update region size */
     uint32_t heap_offset;           /* Source data offset in heap */
+    uint32_t data_size;             /* Size of data in heap */
+    uint32_t dst_x, dst_y, dst_z;   /* Destination offset */
+    uint32_t width, height, depth;  /* Update region size (0 = full resource) */
     uint32_t row_pitch;             /* Source row pitch */
     uint32_t depth_pitch;           /* Source depth pitch */
 } PvgpuCmdUpdateResource;
@@ -332,6 +397,20 @@ typedef struct PvgpuCmdSetShader {
     uint32_t stage;                 /* PvgpuShaderStage */
     uint32_t shader_id;             /* Shader resource ID (0 = unbind) */
 } PvgpuCmdSetShader;
+
+typedef struct PvgpuCmdCreateShader {
+    PvgpuCommandHeader header;
+    uint32_t shader_id;
+    uint32_t shader_type;     /* ShaderStage enum value */
+    uint32_t bytecode_size;
+    uint32_t bytecode_offset; /* Offset into heap where bytecode data resides */
+} PvgpuCmdCreateShader;
+
+typedef struct PvgpuCmdDestroyShader {
+    PvgpuCommandHeader header;
+    uint32_t shader_id;
+    uint32_t reserved[3];
+} PvgpuCmdDestroyShader;
 
 /* CMD_SET_CONSTANT_BUFFER payload */
 typedef struct PvgpuCmdSetConstantBuffer {
@@ -449,6 +528,18 @@ typedef struct PvgpuCmdPresent {
     uint32_t reserved;
 } PvgpuCmdPresent;
 
+/* CMD_RESIZE_BUFFERS payload */
+typedef struct PvgpuCmdResizeBuffers {
+    PvgpuCommandHeader header;
+    uint32_t swapchain_id;          /* Swapchain to resize (0 = default) */
+    uint32_t width;                 /* New width in pixels */
+    uint32_t height;                /* New height in pixels */
+    uint32_t format;                /* New format (DXGI_FORMAT, 0 = keep current) */
+    uint32_t buffer_count;          /* New buffer count (0 = keep current) */
+    uint32_t flags;                 /* Resize flags */
+    uint32_t reserved[2];
+} PvgpuCmdResizeBuffers;
+
 /* CMD_SET_BLEND_STATE payload */
 typedef struct PvgpuCmdSetBlendState {
     PvgpuCommandHeader header;
@@ -498,6 +589,176 @@ typedef struct PvgpuCmdCopyResourceRegion {
 
 /*
  * =============================================================================
+ * State Object Creation Payloads
+ * =============================================================================
+ */
+
+/* CMD_CREATE_BLEND_STATE payload */
+typedef struct PvgpuCmdCreateBlendState {
+    PvgpuCommandHeader header;
+    uint32_t state_id;              /* Assigned state object ID */
+    uint32_t alpha_to_coverage;     /* Enable alpha-to-coverage */
+    uint32_t independent_blend;     /* Enable independent blend per target */
+    struct {
+        uint32_t blend_enable;
+        uint32_t src_blend;         /* D3D11_BLEND */
+        uint32_t dest_blend;        /* D3D11_BLEND */
+        uint32_t blend_op;          /* D3D11_BLEND_OP */
+        uint32_t src_blend_alpha;   /* D3D11_BLEND */
+        uint32_t dest_blend_alpha;  /* D3D11_BLEND */
+        uint32_t blend_op_alpha;    /* D3D11_BLEND_OP */
+        uint32_t render_target_write_mask; /* D3D11_COLOR_WRITE_ENABLE */
+    } render_targets[8];
+} PvgpuCmdCreateBlendState;
+
+/* CMD_CREATE_RASTERIZER_STATE payload */
+typedef struct PvgpuCmdCreateRasterizerState {
+    PvgpuCommandHeader header;
+    uint32_t state_id;              /* Assigned state object ID */
+    uint32_t fill_mode;             /* D3D11_FILL_MODE */
+    uint32_t cull_mode;             /* D3D11_CULL_MODE */
+    uint32_t front_counter_clockwise;
+    int32_t  depth_bias;
+    float    depth_bias_clamp;
+    float    slope_scaled_depth_bias;
+    uint32_t depth_clip_enable;
+    uint32_t scissor_enable;
+    uint32_t multisample_enable;
+    uint32_t antialiased_line_enable;
+} PvgpuCmdCreateRasterizerState;
+
+/* CMD_CREATE_DEPTH_STENCIL_STATE payload */
+typedef struct PvgpuCmdCreateDepthStencilState {
+    PvgpuCommandHeader header;
+    uint32_t state_id;              /* Assigned state object ID */
+    uint32_t depth_enable;
+    uint32_t depth_write_mask;      /* D3D11_DEPTH_WRITE_MASK */
+    uint32_t depth_func;            /* D3D11_COMPARISON_FUNC */
+    uint32_t stencil_enable;
+    uint32_t stencil_read_mask;
+    uint32_t stencil_write_mask;
+    struct {
+        uint32_t stencil_fail_op;   /* D3D11_STENCIL_OP */
+        uint32_t stencil_depth_fail_op;
+        uint32_t stencil_pass_op;
+        uint32_t stencil_func;      /* D3D11_COMPARISON_FUNC */
+    } front_face;
+    struct {
+        uint32_t stencil_fail_op;
+        uint32_t stencil_depth_fail_op;
+        uint32_t stencil_pass_op;
+        uint32_t stencil_func;
+    } back_face;
+} PvgpuCmdCreateDepthStencilState;
+
+/* CMD_CREATE_SAMPLER payload */
+typedef struct PvgpuCmdCreateSampler {
+    PvgpuCommandHeader header;
+    uint32_t sampler_id;            /* Assigned sampler ID */
+    uint32_t filter;                /* D3D11_FILTER */
+    uint32_t address_u;             /* D3D11_TEXTURE_ADDRESS_MODE */
+    uint32_t address_v;
+    uint32_t address_w;
+    float    mip_lod_bias;
+    uint32_t max_anisotropy;
+    uint32_t comparison_func;       /* D3D11_COMPARISON_FUNC */
+    float    border_color[4];
+    float    min_lod;
+    float    max_lod;
+} PvgpuCmdCreateSampler;
+
+/* CMD_CREATE_INPUT_LAYOUT payload */
+typedef struct PvgpuCmdCreateInputLayout {
+    PvgpuCommandHeader header;
+    uint32_t layout_id;             /* Assigned layout ID */
+    uint32_t num_elements;          /* Number of input elements */
+    struct {
+        uint32_t semantic_name_offset; /* Offset in shared memory for name string */
+        uint32_t semantic_index;
+        uint32_t format;            /* DXGI_FORMAT */
+        uint32_t input_slot;
+        uint32_t aligned_byte_offset;
+        uint32_t input_slot_class;  /* D3D11_INPUT_CLASSIFICATION */
+        uint32_t instance_data_step_rate;
+    } elements[32];                 /* Max 32 input elements */
+} PvgpuCmdCreateInputLayout;
+
+/*
+ * =============================================================================
+ * View Creation Payloads
+ * =============================================================================
+ */
+
+/* CMD_CREATE_RENDER_TARGET_VIEW payload */
+typedef struct PvgpuCmdCreateRenderTargetView {
+    PvgpuCommandHeader header;
+    uint32_t view_id;               /* Assigned view ID */
+    uint32_t resource_id;           /* Resource to create view of */
+    uint32_t format;                /* DXGI_FORMAT */
+    uint32_t view_dimension;        /* D3D11_RTV_DIMENSION */
+    union {
+        struct { uint32_t mip_slice; } texture1d;
+        struct { uint32_t mip_slice; uint32_t first_array_slice; uint32_t array_size; } texture1d_array;
+        struct { uint32_t mip_slice; } texture2d;
+        struct { uint32_t mip_slice; uint32_t first_array_slice; uint32_t array_size; } texture2d_array;
+        struct { uint32_t mip_slice; uint32_t first_w_slice; uint32_t w_size; } texture3d;
+    } u;
+} PvgpuCmdCreateRenderTargetView;
+
+/* CMD_CREATE_DEPTH_STENCIL_VIEW payload */
+typedef struct PvgpuCmdCreateDepthStencilView {
+    PvgpuCommandHeader header;
+    uint32_t view_id;               /* Assigned view ID */
+    uint32_t resource_id;           /* Resource to create view of */
+    uint32_t format;                /* DXGI_FORMAT */
+    uint32_t view_dimension;        /* D3D11_DSV_DIMENSION */
+    uint32_t flags;                 /* D3D11_DSV_FLAG */
+    union {
+        struct { uint32_t mip_slice; } texture1d;
+        struct { uint32_t mip_slice; uint32_t first_array_slice; uint32_t array_size; } texture1d_array;
+        struct { uint32_t mip_slice; } texture2d;
+        struct { uint32_t mip_slice; uint32_t first_array_slice; uint32_t array_size; } texture2d_array;
+    } u;
+} PvgpuCmdCreateDepthStencilView;
+
+/* CMD_CREATE_SHADER_RESOURCE_VIEW payload */
+typedef struct PvgpuCmdCreateShaderResourceView {
+    PvgpuCommandHeader header;
+    uint32_t view_id;               /* Assigned view ID */
+    uint32_t resource_id;           /* Resource to create view of */
+    uint32_t format;                /* DXGI_FORMAT */
+    uint32_t view_dimension;        /* D3D11_SRV_DIMENSION */
+    union {
+        struct { uint32_t most_detailed_mip; uint32_t mip_levels; } texture1d;
+        struct { uint32_t most_detailed_mip; uint32_t mip_levels; uint32_t first_array_slice; uint32_t array_size; } texture1d_array;
+        struct { uint32_t most_detailed_mip; uint32_t mip_levels; } texture2d;
+        struct { uint32_t most_detailed_mip; uint32_t mip_levels; uint32_t first_array_slice; uint32_t array_size; } texture2d_array;
+        struct { uint32_t most_detailed_mip; uint32_t mip_levels; } texture3d;
+        struct { uint32_t most_detailed_mip; uint32_t mip_levels; } texturecube;
+        struct { uint32_t first_element; uint32_t num_elements; } buffer;
+    } u;
+} PvgpuCmdCreateShaderResourceView;
+
+/* CMD_SET_SHADER_RESOURCES payload */
+typedef struct PvgpuCmdSetShaderResources {
+    PvgpuCommandHeader header;
+    uint32_t stage;                 /* PvgpuShaderStage */
+    uint32_t start_slot;
+    uint32_t num_views;
+    uint32_t view_ids[128];         /* SRV IDs (0 = unbind) */
+} PvgpuCmdSetShaderResources;
+
+/* CMD_SET_SAMPLERS payload */
+typedef struct PvgpuCmdSetSamplers {
+    PvgpuCommandHeader header;
+    uint32_t stage;                 /* PvgpuShaderStage */
+    uint32_t start_slot;
+    uint32_t num_samplers;
+    uint32_t sampler_ids[16];       /* Sampler IDs (0 = unbind) */
+} PvgpuCmdSetSamplers;
+
+/*
+ * =============================================================================
  * Error Codes
  * =============================================================================
  */
@@ -513,7 +774,131 @@ typedef struct PvgpuCmdCopyResourceRegion {
 #define PVGPU_ERROR_BACKEND_DISCONNECTED 0x0008
 #define PVGPU_ERROR_RING_FULL           0x0009
 #define PVGPU_ERROR_TIMEOUT             0x000A
+#define PVGPU_ERROR_HEAP_EXHAUSTED      0x000B  /* Resource heap is full */
+#define PVGPU_ERROR_INTERNAL            0x000C  /* Internal backend error */
 #define PVGPU_ERROR_UNKNOWN             0xFFFF
+
+/*
+ * =============================================================================
+ * Device Status Flags (for PvgpuControlRegion.status)
+ * =============================================================================
+ */
+
+#define PVGPU_STATUS_READY              (1 << 0)    /* Backend is ready */
+#define PVGPU_STATUS_ERROR              (1 << 1)    /* Error occurred (check error_code) */
+#define PVGPU_STATUS_DEVICE_LOST        (1 << 2)    /* D3D device lost, needs reset */
+#define PVGPU_STATUS_BACKEND_BUSY       (1 << 3)    /* Backend is processing */
+#define PVGPU_STATUS_RESIZING           (1 << 4)    /* Swapchain resize in progress */
+#define PVGPU_STATUS_RECOVERY           (1 << 5)    /* Device recovery in progress */
+#define PVGPU_STATUS_SHUTDOWN           (1 << 6)    /* Backend is shutting down */
+
+/*
+ * =============================================================================
+ * UMD <-> KMD Escape Interface
+ * =============================================================================
+ * 
+ * The UMD communicates with the KMD through DxgkDdiEscape.
+ * This allows the UMD to:
+ * - Allocate/free regions in the shared memory heap
+ * - Get the shared memory base address for direct access
+ * - Submit commands to the ring buffer
+ * - Query device capabilities
+ */
+
+/* Escape codes */
+#define PVGPU_ESCAPE_GET_SHMEM_INFO         0x0001  /* Get shared memory info */
+#define PVGPU_ESCAPE_ALLOC_HEAP             0x0002  /* Allocate from heap */
+#define PVGPU_ESCAPE_FREE_HEAP              0x0003  /* Free heap allocation */
+#define PVGPU_ESCAPE_SUBMIT_COMMANDS        0x0004  /* Submit commands to ring */
+#define PVGPU_ESCAPE_WAIT_FENCE             0x0005  /* Wait for fence completion */
+#define PVGPU_ESCAPE_GET_CAPS               0x0006  /* Get device capabilities */
+#define PVGPU_ESCAPE_RING_DOORBELL          0x0007  /* Ring the doorbell */
+#define PVGPU_ESCAPE_SET_DISPLAY_MODE       0x0008  /* Notify display mode change */
+
+/* Common escape header */
+typedef struct PvgpuEscapeHeader {
+    uint32_t escape_code;           /* PVGPU_ESCAPE_* */
+    uint32_t status;                /* Return status (PVGPU_ERROR_*) */
+} PvgpuEscapeHeader;
+
+/* PVGPU_ESCAPE_GET_SHMEM_INFO input/output */
+typedef struct PvgpuEscapeGetShmemInfo {
+    PvgpuEscapeHeader header;
+    /* Output */
+    uint64_t shmem_base;            /* Virtual address of shared memory (for UMD) */
+    uint32_t shmem_size;            /* Total shared memory size */
+    uint32_t ring_offset;           /* Offset to command ring */
+    uint32_t ring_size;             /* Command ring size */
+    uint32_t heap_offset;           /* Offset to resource heap */
+    uint32_t heap_size;             /* Resource heap size */
+    uint64_t features;              /* Negotiated features */
+} PvgpuEscapeGetShmemInfo;
+
+/* PVGPU_ESCAPE_ALLOC_HEAP input/output */
+typedef struct PvgpuEscapeAllocHeap {
+    PvgpuEscapeHeader header;
+    /* Input */
+    uint32_t size;                  /* Requested size (must be 16-byte aligned) */
+    uint32_t alignment;             /* Required alignment (power of 2) */
+    /* Output */
+    uint32_t offset;                /* Allocated offset in heap */
+    uint32_t allocated_size;        /* Actual allocated size */
+} PvgpuEscapeAllocHeap;
+
+/* PVGPU_ESCAPE_FREE_HEAP input */
+typedef struct PvgpuEscapeFreeHeap {
+    PvgpuEscapeHeader header;
+    /* Input */
+    uint32_t offset;                /* Offset to free */
+    uint32_t size;                  /* Size to free */
+} PvgpuEscapeFreeHeap;
+
+/* PVGPU_ESCAPE_SUBMIT_COMMANDS input */
+typedef struct PvgpuEscapeSubmitCommands {
+    PvgpuEscapeHeader header;
+    /* Input */
+    uint32_t command_offset;        /* Offset in heap where commands are staged */
+    uint32_t command_size;          /* Total size of commands */
+    uint64_t fence_value;           /* Fence value (0 = no fence) */
+    /* Output */
+    uint64_t producer_ptr;          /* Updated producer pointer */
+} PvgpuEscapeSubmitCommands;
+
+/* PVGPU_ESCAPE_WAIT_FENCE input */
+typedef struct PvgpuEscapeWaitFence {
+    PvgpuEscapeHeader header;
+    /* Input */
+    uint64_t fence_value;           /* Fence value to wait for */
+    uint32_t timeout_ms;            /* Timeout in milliseconds (0 = infinite) */
+    uint32_t reserved;
+    /* Output */
+    uint64_t completed_fence;       /* Current completed fence value */
+} PvgpuEscapeWaitFence;
+
+/* PVGPU_ESCAPE_GET_CAPS output */
+typedef struct PvgpuEscapeGetCaps {
+    PvgpuEscapeHeader header;
+    /* Output */
+    uint64_t features;              /* Supported features bitmap */
+    uint32_t max_texture_size;      /* Maximum texture dimension */
+    uint32_t max_render_targets;    /* Maximum simultaneous render targets */
+    uint32_t max_vertex_streams;    /* Maximum vertex buffer streams */
+    uint32_t max_constant_buffers;  /* Maximum constant buffers per stage */
+    uint32_t display_width;         /* Current display width */
+    uint32_t display_height;        /* Current display height */
+    uint32_t display_refresh;       /* Current refresh rate */
+    uint32_t reserved[5];
+} PvgpuEscapeGetCaps;
+
+/* PVGPU_ESCAPE_SET_DISPLAY_MODE input */
+typedef struct PvgpuEscapeSetDisplayMode {
+    PvgpuEscapeHeader header;
+    /* Input */
+    uint32_t width;                 /* New display width */
+    uint32_t height;                /* New display height */
+    uint32_t refresh_rate;          /* New refresh rate in Hz */
+    uint32_t flags;                 /* Reserved for future use */
+} PvgpuEscapeSetDisplayMode;
 
 /*
  * =============================================================================

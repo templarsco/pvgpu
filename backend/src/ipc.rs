@@ -12,14 +12,14 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
-use windows::Win32::Storage::FileSystem::{
-    FlushFileBuffers, ReadFile, WriteFile, PIPE_ACCESS_DUPLEX,
-};
+use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
     PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+};
 
 /// Messages from QEMU device to backend
 #[derive(Debug, Clone)]
@@ -68,6 +68,7 @@ pub struct PipeServer {
     pipe_path: String,
     pipe_handle: HANDLE,
     shutdown_event: HANDLE,
+    doorbell_event: HANDLE,
 }
 
 impl PipeServer {
@@ -75,13 +76,16 @@ impl PipeServer {
     pub fn new(pipe_path: &str) -> Result<Self> {
         info!("Creating named pipe server at: {}", pipe_path);
 
-        // Create shutdown event
+        // Create shutdown event (manual reset)
         let shutdown_event = unsafe { CreateEventW(None, true, false, None)? };
+        // Create doorbell event (auto-reset) - signaled when QEMU sends a doorbell
+        let doorbell_event = unsafe { CreateEventW(None, false, false, None)? };
 
         Ok(Self {
             pipe_path: pipe_path.to_string(),
             pipe_handle: INVALID_HANDLE_VALUE,
             shutdown_event,
+            doorbell_event,
         })
     }
 
@@ -190,8 +194,9 @@ impl PipeServer {
                 })
             }
             3 => {
-                // Doorbell
+                // Doorbell - signal the event so the main loop wakes up
                 debug!("Received doorbell");
+                self.signal_doorbell();
                 Ok(QemuMessage::Doorbell)
             }
             5 => {
@@ -245,9 +250,10 @@ impl PipeServer {
             }
         }
 
-        unsafe {
-            FlushFileBuffers(self.pipe_handle)?;
-        }
+        // NOTE: FlushFileBuffers intentionally removed. Named pipe writes are
+        // already kernel-buffered and delivered in-order. Flushing on every
+        // IRQ message added 50-100+ µs of synchronous I/O per notification.
+        // Pipe buffer (4KB) is more than sufficient for our small messages.
 
         Ok(())
     }
@@ -257,6 +263,27 @@ impl PipeServer {
         unsafe {
             let _ = SetEvent(self.shutdown_event);
         }
+    }
+
+    /// Signal doorbell event (called when QEMU sends a doorbell message)
+    pub fn signal_doorbell(&self) {
+        unsafe {
+            let _ = SetEvent(self.doorbell_event);
+        }
+    }
+
+    /// Wait for doorbell or shutdown event, with a timeout in milliseconds.
+    /// Returns true if doorbell was signaled, false on timeout or shutdown.
+    pub fn wait_for_doorbell(&self, timeout_ms: u32) -> bool {
+        let handles = [self.doorbell_event, self.shutdown_event];
+        let result = unsafe { WaitForMultipleObjects(&handles, false, timeout_ms) };
+        // WAIT_OBJECT_0 = doorbell signaled
+        result == WAIT_OBJECT_0
+    }
+
+    /// Get the doorbell event handle (for external waiting)
+    pub fn doorbell_event(&self) -> HANDLE {
+        self.doorbell_event
     }
 
     /// Check if shutdown was signaled
@@ -276,12 +303,23 @@ impl PipeServer {
     }
 }
 
+// SAFETY: Windows named pipe HANDLEs and event HANDLEs are safe
+// to use from multiple threads. ReadFile and WriteFile are thread-safe
+// on the same handle (they serialize internally in kernel mode).
+unsafe impl Send for PipeServer {}
+unsafe impl Sync for PipeServer {}
+
 impl Drop for PipeServer {
     fn drop(&mut self) {
         self.disconnect();
         if !self.shutdown_event.is_invalid() {
             unsafe {
                 let _ = CloseHandle(self.shutdown_event);
+            }
+        }
+        if !self.doorbell_event.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.doorbell_event);
             }
         }
     }

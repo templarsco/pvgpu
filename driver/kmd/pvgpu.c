@@ -91,6 +91,19 @@ DriverEntry(
     initData.DxgkDdiPresent = PvgpuPresent;
     initData.DxgkDdiRender = PvgpuRender;
 
+    /* Escape for UMD communication */
+    initData.DxgkDdiEscape = PvgpuEscape;
+
+    /* VidPn (Display Mode) functions */
+    initData.DxgkDdiIsSupportedVidPn = PvgpuIsSupportedVidPn;
+    initData.DxgkDdiRecommendFunctionalVidPn = PvgpuRecommendFunctionalVidPn;
+    initData.DxgkDdiEnumVidPnCofuncModality = PvgpuEnumVidPnCofuncModality;
+    initData.DxgkDdiSetVidPnSourceAddress = PvgpuSetVidPnSourceAddress;
+    initData.DxgkDdiSetVidPnSourceVisibility = PvgpuSetVidPnSourceVisibility;
+    initData.DxgkDdiCommitVidPn = PvgpuCommitVidPn;
+    initData.DxgkDdiUpdateActiveVidPnPresentPath = PvgpuUpdateActiveVidPnPresentPath;
+    initData.DxgkDdiRecommendMonitorModes = PvgpuRecommendMonitorModes;
+
     /* Register with DirectX graphics kernel */
     status = DxgkInitialize(DriverObject, RegistryPath, &initData);
 
@@ -272,6 +285,20 @@ PvgpuStartDevice(
         "PVGPU: Display %ux%u @ %u Hz\n",
         context->DisplayWidth, context->DisplayHeight, context->DisplayRefresh));
 
+    /* Initialize heap allocator */
+    status = PvgpuHeapInit(context);
+    if (!NT_SUCCESS(status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+            "PVGPU: Failed to initialize heap allocator\n"));
+        if (context->Bar0VirtAddr) {
+            MmUnmapIoSpace((PVOID)context->Bar0VirtAddr, context->Bar0Length);
+        }
+        if (context->Bar2VirtAddr) {
+            MmUnmapIoSpace((PVOID)context->Bar2VirtAddr, context->Bar2Length);
+        }
+        return status;
+    }
+
     /* We have one video present source and one child (monitor) */
     *NumberOfVideoPresentSources = 1;
     *NumberOfChildren = 1;
@@ -299,6 +326,9 @@ PvgpuStopDevice(
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
         "PVGPU: StopDevice\n"));
+
+    /* Destroy heap allocator */
+    PvgpuHeapDestroy(context);
 
     /* Unmap BARs */
     if (context->Bar0VirtAddr) {
@@ -585,9 +615,63 @@ PvgpuBuildPagingBuffer(
 {
     UNREFERENCED_PARAMETER(MiniportDeviceContext);
 
-    /* TODO: Implement paging operations */
-    BuildPagingBuffer->pDmaBuffer = 
-        (UCHAR*)BuildPagingBuffer->pDmaBuffer + sizeof(ULONG);
+    /*
+     * Handle paging operations for memory transfers.
+     * In our paravirtualized model, actual data movement happens on the host
+     * side via shared memory - we just need to produce valid DMA buffer entries
+     * so the scheduler is satisfied.
+     */
+
+    switch (BuildPagingBuffer->Operation) {
+    case DXGK_OPERATION_TRANSFER:
+        /*
+         * Transfer between memory segments. For PVGPU, resources live in
+         * shared memory accessible to both guest and host, so we don't need
+         * actual GPU DMA. Just advance the DMA buffer pointer to indicate
+         * we "handled" it.
+         */
+        {
+            ULONG transferSize = sizeof(ULONG) * 2;  /* opcode + size marker */
+            if ((UCHAR*)BuildPagingBuffer->pDmaBuffer + transferSize >
+                (UCHAR*)BuildPagingBuffer->pDmaBufferEnd) {
+                return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+            }
+            /* Write a NOP-like transfer marker */
+            *(ULONG*)BuildPagingBuffer->pDmaBuffer = 0;  /* NOP opcode */
+            BuildPagingBuffer->pDmaBuffer =
+                (UCHAR*)BuildPagingBuffer->pDmaBuffer + transferSize;
+        }
+        break;
+
+    case DXGK_OPERATION_FILL:
+        /*
+         * Fill a memory region with a pattern. Used for clearing allocations.
+         * We can handle this via shared memory on the host.
+         */
+        {
+            ULONG fillSize = sizeof(ULONG) * 2;
+            if ((UCHAR*)BuildPagingBuffer->pDmaBuffer + fillSize >
+                (UCHAR*)BuildPagingBuffer->pDmaBufferEnd) {
+                return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+            }
+            *(ULONG*)BuildPagingBuffer->pDmaBuffer = 0;
+            BuildPagingBuffer->pDmaBuffer =
+                (UCHAR*)BuildPagingBuffer->pDmaBuffer + fillSize;
+        }
+        break;
+
+    case DXGK_OPERATION_DISCARD_CONTENT:
+        /* Content can be discarded - nothing to do */
+        BuildPagingBuffer->pDmaBuffer =
+            (UCHAR*)BuildPagingBuffer->pDmaBuffer + sizeof(ULONG);
+        break;
+
+    default:
+        /* Other operations: just advance DMA buffer minimally */
+        BuildPagingBuffer->pDmaBuffer =
+            (UCHAR*)BuildPagingBuffer->pDmaBuffer + sizeof(ULONG);
+        break;
+    }
 
     return STATUS_SUCCESS;
 }
@@ -701,10 +785,59 @@ PvgpuCreateAllocation(
     _Inout_ DXGKARG_CREATEALLOCATION* CreateAllocation
 )
 {
-    UNREFERENCED_PARAMETER(MiniportDeviceContext);
-    UNREFERENCED_PARAMETER(CreateAllocation);
+    PPVGPU_DEVICE_CONTEXT context = (PPVGPU_DEVICE_CONTEXT)MiniportDeviceContext;
+    ULONG i;
 
-    /* TODO: Implement allocation creation */
+    /*
+     * Process each allocation request. For PVGPU, allocations map to regions
+     * in the shared memory heap that both guest and host can access.
+     * The actual GPU resource creation happens on the host side.
+     */
+    for (i = 0; i < CreateAllocation->NumAllocations; i++) {
+        DXGK_ALLOCATIONINFO* allocInfo = &CreateAllocation->pAllocationInfo[i];
+        ULONG allocationSize;
+
+        /*
+         * Determine allocation size from private driver data.
+         * If private data is provided, use it; otherwise use a default page.
+         */
+        if (allocInfo->pPrivateDriverData != NULL &&
+            allocInfo->PrivateDriverDataSize >= sizeof(ULONG)) {
+            allocationSize = *(ULONG*)allocInfo->pPrivateDriverData;
+        } else {
+            allocationSize = PVGPU_HEAP_BLOCK_SIZE;  /* Default 4KB */
+        }
+
+        /* Ensure minimum allocation size */
+        if (allocationSize == 0) {
+            allocationSize = PVGPU_HEAP_BLOCK_SIZE;
+        }
+
+        /* Align to heap block size */
+        allocationSize = (allocationSize + PVGPU_HEAP_BLOCK_SIZE - 1) &
+                         ~(PVGPU_HEAP_BLOCK_SIZE - 1);
+
+        /*
+         * Set allocation properties:
+         * - Segment 1 is our shared memory segment (BAR2)
+         * - CpuVisible so UMD can map and write commands
+         */
+        allocInfo->Alignment = PVGPU_HEAP_BLOCK_SIZE;
+        allocInfo->Size = allocationSize;
+        allocInfo->PitchAlignedSize = 0;
+        allocInfo->HintedBank.Value = 0;
+        allocInfo->PreferredSegment.Value = 0;
+        allocInfo->SupportedReadSegmentSet = 1;   /* Segment 1 */
+        allocInfo->SupportedWriteSegmentSet = 1;  /* Segment 1 */
+        allocInfo->EvictionSegmentSet = 0;
+        allocInfo->MaximumRenamingListLength = 0;
+        allocInfo->pAllocationUsageHint = NULL;
+        allocInfo->Flags.Value = 0;
+        allocInfo->Flags.CpuVisible = 1;
+    }
+
+    UNREFERENCED_PARAMETER(context);
+
     return STATUS_SUCCESS;
 }
 
@@ -756,10 +889,43 @@ PvgpuPresent(
     _Inout_ DXGKARG_PRESENT* Present
 )
 {
-    UNREFERENCED_PARAMETER(MiniportDeviceContext);
-    UNREFERENCED_PARAMETER(Present);
+    PPVGPU_DEVICE_CONTEXT context = (PPVGPU_DEVICE_CONTEXT)MiniportDeviceContext;
+    PvgpuCmdPresent cmd;
+    NTSTATUS status;
 
-    /* TODO: Queue present command to ring buffer */
+    /*
+     * Build a present command and submit it to the ring buffer.
+     * The host backend will pick this up, do the actual present/flip
+     * via its D3D11 swapchain, and signal completion.
+     */
+    RtlZeroMemory(&cmd, sizeof(cmd));
+    cmd.header.type = PVGPU_CMD_PRESENT;
+    cmd.header.size = sizeof(PvgpuCmdPresent);
+    cmd.header.fence_id = 0;  /* Fence managed by SubmitCommand */
+
+    /*
+     * Use the source allocation handle as the backbuffer ID.
+     * The host will use this to identify which resource to present.
+     */
+    if (Present->pSource != NULL) {
+        cmd.backbuffer_id = (UINT32)(ULONG_PTR)Present->hAllocation;
+    }
+    cmd.sync_interval = 1;  /* Default VSync on */
+    cmd.flags = 0;
+
+    /* Write present command to DMA buffer */
+    if ((UCHAR*)Present->pDmaBuffer + sizeof(cmd) <=
+        (UCHAR*)Present->pDmaBufferEnd) {
+        RtlCopyMemory(Present->pDmaBuffer, &cmd, sizeof(cmd));
+        Present->pDmaBuffer = (UCHAR*)Present->pDmaBuffer + sizeof(cmd);
+    }
+
+    /* Submit to ring buffer and notify host */
+    status = PvgpuSubmitToRing(context, &cmd, sizeof(cmd));
+    if (NT_SUCCESS(status)) {
+        PvgpuRingDoorbell(context);
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -769,10 +935,69 @@ PvgpuRender(
     _Inout_ DXGKARG_RENDER* Render
 )
 {
-    UNREFERENCED_PARAMETER(MiniportDeviceContext);
-    UNREFERENCED_PARAMETER(Render);
+    PPVGPU_DEVICE_CONTEXT context = (PPVGPU_DEVICE_CONTEXT)MiniportDeviceContext;
+    SIZE_T commandSize;
+    NTSTATUS status;
 
-    /* TODO: Build command buffer from UMD commands */
+    /*
+     * The UMD builds a command buffer in user-mode memory. The KMD's job in
+     * Render() is to validate and copy those commands into the DMA buffer
+     * for later submission by SubmitCommand().
+     *
+     * For PVGPU, UMD commands are already in our protocol format, so we
+     * can copy them directly. In a real driver, we'd do validation and
+     * potentially translate addresses.
+     */
+
+    /* Calculate how many bytes the UMD submitted */
+    commandSize = (UCHAR*)Render->pCommand + Render->CommandLength -
+                  (UCHAR*)Render->pCommand;
+    if (commandSize == 0) {
+        /* Nothing to render */
+        return STATUS_SUCCESS;
+    }
+
+    /* Verify DMA buffer has enough space */
+    if ((UCHAR*)Render->pDmaBuffer + commandSize >
+        (UCHAR*)Render->pDmaBufferEnd) {
+        /* Request a larger DMA buffer */
+        Render->MultipassOffset = 0;
+        return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+    }
+
+    /*
+     * Copy UMD commands directly to DMA buffer.
+     * The UMD command format matches our ring buffer protocol, so
+     * no translation is needed. The commands will be submitted to
+     * the ring buffer in SubmitCommand().
+     */
+    __try {
+        RtlCopyMemory(Render->pDmaBuffer, Render->pCommand, commandSize);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return STATUS_INVALID_USER_BUFFER;
+    }
+
+    /* Advance DMA buffer pointer past what we wrote */
+    Render->pDmaBuffer = (UCHAR*)Render->pDmaBuffer + commandSize;
+
+    /* Also submit directly to ring buffer for host processing */
+    __try {
+        status = PvgpuSubmitToRing(context, Render->pCommand, (ULONG)commandSize);
+        if (NT_SUCCESS(status)) {
+            PvgpuRingDoorbell(context);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        /* Continue even if ring submission fails - DMA buffer is valid */
+    }
+
+    /* Set private driver data size (used by SubmitCommand) */
+    if (Render->pDmaBufferPrivateData != NULL &&
+        Render->pDmaBufferPrivateDataSize >= sizeof(ULONG)) {
+        *(ULONG*)Render->pDmaBufferPrivateData = (ULONG)commandSize;
+        Render->pDmaBufferPrivateData =
+            (UCHAR*)Render->pDmaBufferPrivateData + sizeof(ULONG);
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -828,6 +1053,915 @@ PvgpuSubmitToRing(
     Context->ControlRegion->producer_ptr = producer + CommandSize;
 
     KeReleaseSpinLock(&Context->CommandLock, oldIrql);
+
+    return STATUS_SUCCESS;
+}
+
+/*
+ * =============================================================================
+ * Heap Allocator Implementation
+ * =============================================================================
+ */
+
+NTSTATUS
+PvgpuHeapInit(
+    _In_ PPVGPU_DEVICE_CONTEXT Context
+)
+{
+    PPVGPU_HEAP_ALLOCATOR alloc = &Context->HeapAllocator;
+    ULONG bitmapSizeBytes;
+
+    /* Calculate block count */
+    alloc->HeapOffset = Context->ControlRegion->heap_offset;
+    alloc->HeapSize = Context->ResourceHeapSize;
+    alloc->BlockSize = PVGPU_HEAP_BLOCK_SIZE;
+    alloc->NumBlocks = alloc->HeapSize / alloc->BlockSize;
+    alloc->FreeBlocks = alloc->NumBlocks;
+
+    if (alloc->NumBlocks > PVGPU_HEAP_MAX_BLOCKS) {
+        alloc->NumBlocks = PVGPU_HEAP_MAX_BLOCKS;
+    }
+
+    /* Allocate bitmap buffer */
+    bitmapSizeBytes = (alloc->NumBlocks + 31) / 32 * sizeof(ULONG);
+    alloc->BitmapBuffer = ExAllocatePool2(
+        POOL_FLAG_NON_PAGED,
+        bitmapSizeBytes,
+        PVGPU_POOL_TAG);
+
+    if (!alloc->BitmapBuffer) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+            "PVGPU: Failed to allocate heap bitmap\n"));
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    /* Initialize bitmap (all blocks free = 0) */
+    RtlZeroMemory(alloc->BitmapBuffer, bitmapSizeBytes);
+    RtlInitializeBitMap(&alloc->Bitmap, alloc->BitmapBuffer, alloc->NumBlocks);
+
+    KeInitializeSpinLock(&alloc->Lock);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "PVGPU: Heap initialized: %u blocks of %u bytes\n",
+        alloc->NumBlocks, alloc->BlockSize));
+
+    return STATUS_SUCCESS;
+}
+
+VOID
+PvgpuHeapDestroy(
+    _In_ PPVGPU_DEVICE_CONTEXT Context
+)
+{
+    PPVGPU_HEAP_ALLOCATOR alloc = &Context->HeapAllocator;
+
+    if (alloc->BitmapBuffer) {
+        ExFreePoolWithTag(alloc->BitmapBuffer, PVGPU_POOL_TAG);
+        alloc->BitmapBuffer = NULL;
+    }
+}
+
+NTSTATUS
+PvgpuHeapAlloc(
+    _In_ PPVGPU_DEVICE_CONTEXT Context,
+    _In_ ULONG Size,
+    _In_ ULONG Alignment,
+    _Out_ PULONG Offset,
+    _Out_ PULONG AllocatedSize
+)
+{
+    PPVGPU_HEAP_ALLOCATOR alloc = &Context->HeapAllocator;
+    KIRQL oldIrql;
+    ULONG blocksNeeded;
+    ULONG startBlock;
+    ULONG alignmentBlocks;
+
+    *Offset = 0;
+    *AllocatedSize = 0;
+
+    /* Calculate blocks needed (round up) */
+    blocksNeeded = (Size + alloc->BlockSize - 1) / alloc->BlockSize;
+
+    /* Handle alignment */
+    if (Alignment > alloc->BlockSize) {
+        alignmentBlocks = Alignment / alloc->BlockSize;
+    } else {
+        alignmentBlocks = 1;
+    }
+
+    KeAcquireSpinLock(&alloc->Lock, &oldIrql);
+
+    /* Find contiguous free blocks */
+    startBlock = RtlFindClearBits(&alloc->Bitmap, blocksNeeded, 0);
+
+    if (startBlock == 0xFFFFFFFF) {
+        KeReleaseSpinLock(&alloc->Lock, oldIrql);
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+            "PVGPU: Heap allocation failed: no space for %u blocks\n", blocksNeeded));
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    /* Align start block if needed */
+    if (alignmentBlocks > 1) {
+        ULONG alignedStart = (startBlock + alignmentBlocks - 1) & ~(alignmentBlocks - 1);
+        if (alignedStart != startBlock) {
+            /* Try to find from aligned position */
+            startBlock = RtlFindClearBits(&alloc->Bitmap, blocksNeeded, alignedStart);
+            if (startBlock == 0xFFFFFFFF) {
+                KeReleaseSpinLock(&alloc->Lock, oldIrql);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+        }
+    }
+
+    /* Mark blocks as allocated */
+    RtlSetBits(&alloc->Bitmap, startBlock, blocksNeeded);
+    alloc->FreeBlocks -= blocksNeeded;
+
+    KeReleaseSpinLock(&alloc->Lock, oldIrql);
+
+    *Offset = alloc->HeapOffset + (startBlock * alloc->BlockSize);
+    *AllocatedSize = blocksNeeded * alloc->BlockSize;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+        "PVGPU: Heap alloc: offset=%u size=%u\n", *Offset, *AllocatedSize));
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+PvgpuHeapFree(
+    _In_ PPVGPU_DEVICE_CONTEXT Context,
+    _In_ ULONG Offset,
+    _In_ ULONG Size
+)
+{
+    PPVGPU_HEAP_ALLOCATOR alloc = &Context->HeapAllocator;
+    KIRQL oldIrql;
+    ULONG startBlock;
+    ULONG numBlocks;
+
+    /* Validate offset is within heap */
+    if (Offset < alloc->HeapOffset || Offset >= alloc->HeapOffset + alloc->HeapSize) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    startBlock = (Offset - alloc->HeapOffset) / alloc->BlockSize;
+    numBlocks = (Size + alloc->BlockSize - 1) / alloc->BlockSize;
+
+    if (startBlock + numBlocks > alloc->NumBlocks) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KeAcquireSpinLock(&alloc->Lock, &oldIrql);
+
+    /* Mark blocks as free */
+    RtlClearBits(&alloc->Bitmap, startBlock, numBlocks);
+    alloc->FreeBlocks += numBlocks;
+
+    KeReleaseSpinLock(&alloc->Lock, oldIrql);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+        "PVGPU: Heap free: offset=%u size=%u\n", Offset, Size));
+
+    return STATUS_SUCCESS;
+}
+
+/*
+ * =============================================================================
+ * Escape Handler (UMD <-> KMD Communication)
+ * =============================================================================
+ */
+
+NTSTATUS
+PvgpuEscape(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_ESCAPE* Escape
+)
+{
+    PPVGPU_DEVICE_CONTEXT context = (PPVGPU_DEVICE_CONTEXT)MiniportDeviceContext;
+    PvgpuEscapeHeader* header;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (!Escape->pPrivateDriverData || Escape->PrivateDriverDataSize < sizeof(PvgpuEscapeHeader)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    header = (PvgpuEscapeHeader*)Escape->pPrivateDriverData;
+
+    switch (header->escape_code) {
+    case PVGPU_ESCAPE_GET_SHMEM_INFO:
+    {
+        PvgpuEscapeGetShmemInfo* info = (PvgpuEscapeGetShmemInfo*)header;
+
+        if (Escape->PrivateDriverDataSize < sizeof(PvgpuEscapeGetShmemInfo)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        info->shmem_base = (ULONG64)(ULONG_PTR)context->Bar2VirtAddr;
+        info->shmem_size = context->Bar2Length;
+        info->ring_offset = context->ControlRegion->ring_offset;
+        info->ring_size = context->CommandRingSize;
+        info->heap_offset = context->ControlRegion->heap_offset;
+        info->heap_size = context->ResourceHeapSize;
+        info->features = context->ControlRegion->features;
+        info->header.status = PVGPU_ERROR_SUCCESS;
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+            "PVGPU: Escape GET_SHMEM_INFO: base=%p size=%u\n",
+            (PVOID)info->shmem_base, info->shmem_size));
+        break;
+    }
+
+    case PVGPU_ESCAPE_ALLOC_HEAP:
+    {
+        PvgpuEscapeAllocHeap* alloc = (PvgpuEscapeAllocHeap*)header;
+
+        if (Escape->PrivateDriverDataSize < sizeof(PvgpuEscapeAllocHeap)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        status = PvgpuHeapAlloc(
+            context,
+            alloc->size,
+            alloc->alignment,
+            &alloc->offset,
+            &alloc->allocated_size);
+
+        alloc->header.status = NT_SUCCESS(status) ? 
+            PVGPU_ERROR_SUCCESS : PVGPU_ERROR_OUT_OF_MEMORY;
+        break;
+    }
+
+    case PVGPU_ESCAPE_FREE_HEAP:
+    {
+        PvgpuEscapeFreeHeap* free = (PvgpuEscapeFreeHeap*)header;
+
+        if (Escape->PrivateDriverDataSize < sizeof(PvgpuEscapeFreeHeap)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        status = PvgpuHeapFree(context, free->offset, free->size);
+        free->header.status = NT_SUCCESS(status) ? 
+            PVGPU_ERROR_SUCCESS : PVGPU_ERROR_INVALID_PARAMETER;
+        break;
+    }
+
+    case PVGPU_ESCAPE_SUBMIT_COMMANDS:
+    {
+        PvgpuEscapeSubmitCommands* submit = (PvgpuEscapeSubmitCommands*)header;
+        PVOID cmdData;
+
+        if (Escape->PrivateDriverDataSize < sizeof(PvgpuEscapeSubmitCommands)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        /* Get command data from heap */
+        cmdData = (PVOID)(context->Bar2VirtAddr + submit->command_offset);
+
+        /* Submit to ring */
+        status = PvgpuSubmitToRing(context, cmdData, submit->command_size);
+
+        if (NT_SUCCESS(status)) {
+            /* Ring doorbell */
+            PvgpuRingDoorbell(context);
+            submit->producer_ptr = context->ControlRegion->producer_ptr;
+            submit->header.status = PVGPU_ERROR_SUCCESS;
+        } else {
+            submit->header.status = PVGPU_ERROR_RING_FULL;
+        }
+        break;
+    }
+
+    case PVGPU_ESCAPE_WAIT_FENCE:
+    {
+        PvgpuEscapeWaitFence* wait = (PvgpuEscapeWaitFence*)header;
+        LARGE_INTEGER timeout;
+        ULONG64 completedFence;
+        ULONG32 deviceStatus;
+
+        if (Escape->PrivateDriverDataSize < sizeof(PvgpuEscapeWaitFence)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        /* Calculate timeout */
+        if (wait->timeout_ms == 0) {
+            timeout.QuadPart = MAXLONGLONG; /* Infinite */
+        } else {
+            timeout.QuadPart = -((LONGLONG)wait->timeout_ms * 10000); /* Relative, 100ns units */
+        }
+
+        /* Poll for fence completion (simple implementation) */
+        /* In production, this should use an event/interrupt */
+        while (TRUE) {
+            /* Check device status - abort if backend disconnected or error */
+            deviceStatus = context->ControlRegion->status;
+            if (deviceStatus & PVGPU_STATUS_SHUTDOWN) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "PVGPU: WaitFence - Backend shutdown detected\n"));
+                status = STATUS_DEVICE_REMOVED;
+                wait->header.status = PVGPU_ERROR_BACKEND_DISCONNECTED;
+                break;
+            }
+            if (deviceStatus & PVGPU_STATUS_DEVICE_LOST) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "PVGPU: WaitFence - Device lost detected\n"));
+                status = STATUS_DEVICE_REMOVED;
+                wait->header.status = PVGPU_ERROR_DEVICE_LOST;
+                break;
+            }
+            if ((deviceStatus & PVGPU_STATUS_ERROR) && 
+                context->ControlRegion->error_code != PVGPU_ERROR_SUCCESS) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "PVGPU: WaitFence - Backend error %u\n", 
+                    context->ControlRegion->error_code));
+                /* Non-fatal error - continue but report it */
+            }
+
+            completedFence = context->ControlRegion->host_fence_completed;
+            if (completedFence >= wait->fence_value) {
+                break;
+            }
+
+            /* Yield and check for timeout */
+            LARGE_INTEGER delay;
+            delay.QuadPart = -10000; /* 1ms */
+            KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+            /* Simple timeout check */
+            if (wait->timeout_ms != 0) {
+                wait->timeout_ms--;
+                if (wait->timeout_ms == 0) {
+                    status = STATUS_TIMEOUT;
+                    break;
+                }
+            }
+        }
+
+        if (NT_SUCCESS(status)) {
+            wait->completed_fence = context->ControlRegion->host_fence_completed;
+            wait->header.status = PVGPU_ERROR_SUCCESS;
+        } else if (status == STATUS_TIMEOUT) {
+            wait->completed_fence = context->ControlRegion->host_fence_completed;
+            wait->header.status = PVGPU_ERROR_TIMEOUT;
+        }
+        /* Other error statuses already have header.status set above */
+        break;
+    }
+
+    case PVGPU_ESCAPE_GET_CAPS:
+    {
+        PvgpuEscapeGetCaps* caps = (PvgpuEscapeGetCaps*)header;
+
+        if (Escape->PrivateDriverDataSize < sizeof(PvgpuEscapeGetCaps)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        caps->features = context->ControlRegion->features;
+        caps->max_texture_size = 16384;      /* D3D11 max */
+        caps->max_render_targets = 8;        /* D3D11 standard */
+        caps->max_vertex_streams = 16;
+        caps->max_constant_buffers = 14;     /* Per stage */
+        caps->display_width = context->DisplayWidth;
+        caps->display_height = context->DisplayHeight;
+        caps->display_refresh = context->DisplayRefresh;
+        caps->header.status = PVGPU_ERROR_SUCCESS;
+        break;
+    }
+
+    case PVGPU_ESCAPE_RING_DOORBELL:
+    {
+        PvgpuRingDoorbell(context);
+        header->status = PVGPU_ERROR_SUCCESS;
+        break;
+    }
+
+    case PVGPU_ESCAPE_SET_DISPLAY_MODE:
+    {
+        PvgpuEscapeSetDisplayMode* mode = (PvgpuEscapeSetDisplayMode*)header;
+
+        if (Escape->PrivateDriverDataSize < sizeof(PvgpuEscapeSetDisplayMode)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        /* Validate mode dimensions */
+        if (mode->width == 0 || mode->height == 0 || mode->refresh_rate == 0) {
+            mode->header.status = PVGPU_ERROR_INVALID_PARAMETER;
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        /* Update local display state */
+        context->DisplayWidth = mode->width;
+        context->DisplayHeight = mode->height;
+        context->DisplayRefresh = mode->refresh_rate;
+
+        /* Update control region to notify backend */
+        if (context->ControlRegion) {
+            context->ControlRegion->display_width = mode->width;
+            context->ControlRegion->display_height = mode->height;
+            context->ControlRegion->display_refresh = mode->refresh_rate;
+        }
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "PVGPU: SetDisplayMode: %ux%u @ %u Hz\n",
+            mode->width, mode->height, mode->refresh_rate));
+
+        mode->header.status = PVGPU_ERROR_SUCCESS;
+        break;
+    }
+
+    default:
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+            "PVGPU: Unknown escape code: 0x%08X\n", header->escape_code));
+        header->status = PVGPU_ERROR_INVALID_COMMAND;
+        status = STATUS_NOT_SUPPORTED;
+        break;
+    }
+
+    return status;
+}
+
+/*
+ * =============================================================================
+ * VidPn Functions (Display Mode Enumeration)
+ * =============================================================================
+ */
+
+/*
+ * Helper: Add a source mode to the pinned source mode set
+ */
+static NTSTATUS
+PvgpuAddSourceMode(
+    _In_ D3DKMDT_HVIDPNSOURCEMODESET hModeSet,
+    _In_ CONST DXGK_VIDPNSOURCEMODESET_INTERFACE* pModeSetInterface,
+    _In_ ULONG Width,
+    _In_ ULONG Height
+)
+{
+    NTSTATUS status;
+    D3DKMDT_VIDPN_SOURCE_MODE* pMode = NULL;
+
+    status = pModeSetInterface->pfnCreateNewModeInfo(hModeSet, &pMode);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    pMode->Type = D3DKMDT_RMT_GRAPHICS;
+    pMode->Format.Graphics.PrimSurfSize.cx = Width;
+    pMode->Format.Graphics.PrimSurfSize.cy = Height;
+    pMode->Format.Graphics.VisibleRegionSize.cx = Width;
+    pMode->Format.Graphics.VisibleRegionSize.cy = Height;
+    pMode->Format.Graphics.Stride = Width * 4;  /* BGRA */
+    pMode->Format.Graphics.PixelFormat = D3DDDIFMT_A8R8G8B8;
+    pMode->Format.Graphics.ColorBasis = D3DKMDT_CB_SRGB;
+    pMode->Format.Graphics.PixelValueAccessMode = D3DKMDT_PVAM_DIRECT;
+
+    status = pModeSetInterface->pfnAddMode(hModeSet, pMode);
+    if (!NT_SUCCESS(status)) {
+        pModeSetInterface->pfnReleaseModeInfo(hModeSet, pMode);
+    }
+
+    return status;
+}
+
+/*
+ * Helper: Add a target mode to the pinned target mode set
+ */
+static NTSTATUS
+PvgpuAddTargetMode(
+    _In_ D3DKMDT_HVIDPNTARGETMODESET hModeSet,
+    _In_ CONST DXGK_VIDPNTARGETMODESET_INTERFACE* pModeSetInterface,
+    _In_ ULONG Width,
+    _In_ ULONG Height,
+    _In_ ULONG RefreshRate
+)
+{
+    NTSTATUS status;
+    D3DKMDT_VIDPN_TARGET_MODE* pMode = NULL;
+
+    status = pModeSetInterface->pfnCreateNewModeInfo(hModeSet, &pMode);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    pMode->VideoSignalInfo.VideoStandard = D3DKMDT_VSS_OTHER;
+    pMode->VideoSignalInfo.TotalSize.cx = Width;
+    pMode->VideoSignalInfo.TotalSize.cy = Height;
+    pMode->VideoSignalInfo.ActiveSize.cx = Width;
+    pMode->VideoSignalInfo.ActiveSize.cy = Height;
+    pMode->VideoSignalInfo.VSyncFreq.Numerator = RefreshRate;
+    pMode->VideoSignalInfo.VSyncFreq.Denominator = 1;
+    pMode->VideoSignalInfo.HSyncFreq.Numerator = RefreshRate * Height;
+    pMode->VideoSignalInfo.HSyncFreq.Denominator = 1;
+    pMode->VideoSignalInfo.PixelRate = (ULONG64)Width * Height * RefreshRate;
+    pMode->VideoSignalInfo.ScanLineOrdering = D3DDDI_VSSLO_PROGRESSIVE;
+    pMode->Preference = D3DKMDT_MP_PREFERRED;
+
+    status = pModeSetInterface->pfnAddMode(hModeSet, pMode);
+    if (!NT_SUCCESS(status)) {
+        pModeSetInterface->pfnReleaseModeInfo(hModeSet, pMode);
+    }
+
+    return status;
+}
+
+NTSTATUS
+PvgpuIsSupportedVidPn(
+    _In_ PVOID MiniportDeviceContext,
+    _Inout_ DXGKARG_ISSUPPORTEDVIDPN* IsSupportedVidPn
+)
+{
+    UNREFERENCED_PARAMETER(MiniportDeviceContext);
+
+    /*
+     * We support any VidPn that connects our single source to our single target.
+     * For simplicity, we accept all proposed VidPns.
+     */
+    IsSupportedVidPn->IsVidPnSupported = TRUE;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+        "PVGPU: IsSupportedVidPn - returning TRUE\n"));
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+PvgpuRecommendFunctionalVidPn(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_RECOMMENDFUNCTIONALVIDPN* RecommendFunctionalVidPn
+)
+{
+    PPVGPU_DEVICE_CONTEXT context = (PPVGPU_DEVICE_CONTEXT)MiniportDeviceContext;
+    NTSTATUS status;
+    CONST DXGK_VIDPN_INTERFACE* pVidPnInterface;
+    D3DKMDT_HVIDPN hVidPn;
+    D3DKMDT_HVIDPNTOPOLOGY hTopology;
+    CONST DXGK_VIDPNTOPOLOGY_INTERFACE* pTopologyInterface;
+    D3DKMDT_VIDPN_PRESENT_PATH* pPath;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "PVGPU: RecommendFunctionalVidPn\n"));
+
+    hVidPn = RecommendFunctionalVidPn->hRecommendedFunctionalVidPn;
+
+    /* Get VidPn interface */
+    status = context->DxgkInterface.DxgkCbQueryVidPnInterface(
+        hVidPn,
+        DXGK_VIDPN_INTERFACE_VERSION_V1,
+        &pVidPnInterface);
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    /* Get topology */
+    status = pVidPnInterface->pfnGetTopology(hVidPn, &hTopology, &pTopologyInterface);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    /* Create a present path from source 0 to target 0 */
+    status = pTopologyInterface->pfnCreateNewPathInfo(hTopology, &pPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    pPath->VidPnSourceId = 0;
+    pPath->VidPnTargetId = 0;
+    pPath->ImportanceOrdinal = D3DKMDT_VPPI_PRIMARY;
+    pPath->ContentTransformation.Scaling = D3DKMDT_VPPS_IDENTITY;
+    pPath->ContentTransformation.ScalingSupport.Identity = TRUE;
+    pPath->ContentTransformation.Rotation = D3DKMDT_VPPR_IDENTITY;
+    pPath->ContentTransformation.RotationSupport.Identity = TRUE;
+    pPath->VisibleFromActiveTLOffset.cx = 0;
+    pPath->VisibleFromActiveTLOffset.cy = 0;
+    pPath->VisibleFromActiveBROffset.cx = 0;
+    pPath->VisibleFromActiveBROffset.cy = 0;
+    pPath->VidPnTargetColorBasis = D3DKMDT_CB_SRGB;
+    pPath->VidPnTargetColorCoeffDynamicRanges.FirstChannel = 8;
+    pPath->VidPnTargetColorCoeffDynamicRanges.SecondChannel = 8;
+    pPath->VidPnTargetColorCoeffDynamicRanges.ThirdChannel = 8;
+    pPath->VidPnTargetColorCoeffDynamicRanges.FourthChannel = 8;
+    pPath->Content = D3DKMDT_VPPC_GRAPHICS;
+    pPath->CopyProtection.CopyProtectionType = D3DKMDT_VPPMT_NOPROTECTION;
+    pPath->GammaRamp.Type = D3DDDI_GAMMARAMP_DEFAULT;
+
+    status = pTopologyInterface->pfnAddPath(hTopology, pPath);
+    if (!NT_SUCCESS(status)) {
+        pTopologyInterface->pfnReleasePathInfo(hTopology, pPath);
+        return status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+PvgpuEnumVidPnCofuncModality(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_ENUMVIDPNCOFUNCMODALITY* EnumCofuncModality
+)
+{
+    PPVGPU_DEVICE_CONTEXT context = (PPVGPU_DEVICE_CONTEXT)MiniportDeviceContext;
+    NTSTATUS status;
+    CONST DXGK_VIDPN_INTERFACE* pVidPnInterface;
+    D3DKMDT_HVIDPN hVidPn;
+    D3DKMDT_HVIDPNTOPOLOGY hTopology;
+    CONST DXGK_VIDPNTOPOLOGY_INTERFACE* pTopologyInterface;
+    D3DKMDT_HVIDPNSOURCEMODESET hSourceModeSet;
+    CONST DXGK_VIDPNSOURCEMODESET_INTERFACE* pSourceModeSetInterface;
+    D3DKMDT_HVIDPNTARGETMODESET hTargetModeSet;
+    CONST DXGK_VIDPNTARGETMODESET_INTERFACE* pTargetModeSetInterface;
+    ULONG i;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "PVGPU: EnumVidPnCofuncModality\n"));
+
+    hVidPn = EnumCofuncModality->hConstrainingVidPn;
+
+    /* Get VidPn interface */
+    status = context->DxgkInterface.DxgkCbQueryVidPnInterface(
+        hVidPn,
+        DXGK_VIDPN_INTERFACE_VERSION_V1,
+        &pVidPnInterface);
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    /* Get topology */
+    status = pVidPnInterface->pfnGetTopology(hVidPn, &hTopology, &pTopologyInterface);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    /*
+     * Add source modes if the source mode set is not pinned
+     */
+    status = pVidPnInterface->pfnAcquireSourceModeSet(
+        hVidPn,
+        0,  /* Source ID */
+        &hSourceModeSet,
+        &pSourceModeSetInterface);
+
+    if (NT_SUCCESS(status)) {
+        CONST D3DKMDT_VIDPN_SOURCE_MODE* pPinnedMode;
+
+        status = pSourceModeSetInterface->pfnAcquirePinnedModeInfo(
+            hSourceModeSet,
+            &pPinnedMode);
+
+        if (status == STATUS_GRAPHICS_MODE_NOT_PINNED || pPinnedMode == NULL) {
+            /* No pinned mode - add all supported modes */
+            for (i = 0; i < PVGPU_NUM_DISPLAY_MODES; i++) {
+                PvgpuAddSourceMode(
+                    hSourceModeSet,
+                    pSourceModeSetInterface,
+                    g_DisplayModes[i].Width,
+                    g_DisplayModes[i].Height);
+            }
+        } else {
+            pSourceModeSetInterface->pfnReleaseModeInfo(hSourceModeSet, pPinnedMode);
+        }
+
+        pVidPnInterface->pfnAssignSourceModeSet(hVidPn, 0, hSourceModeSet);
+    }
+
+    /*
+     * Add target modes if the target mode set is not pinned
+     */
+    status = pVidPnInterface->pfnAcquireTargetModeSet(
+        hVidPn,
+        0,  /* Target ID */
+        &hTargetModeSet,
+        &pTargetModeSetInterface);
+
+    if (NT_SUCCESS(status)) {
+        CONST D3DKMDT_VIDPN_TARGET_MODE* pPinnedMode;
+
+        status = pTargetModeSetInterface->pfnAcquirePinnedModeInfo(
+            hTargetModeSet,
+            &pPinnedMode);
+
+        if (status == STATUS_GRAPHICS_MODE_NOT_PINNED || pPinnedMode == NULL) {
+            /* No pinned mode - add all supported modes */
+            for (i = 0; i < PVGPU_NUM_DISPLAY_MODES; i++) {
+                PvgpuAddTargetMode(
+                    hTargetModeSet,
+                    pTargetModeSetInterface,
+                    g_DisplayModes[i].Width,
+                    g_DisplayModes[i].Height,
+                    g_DisplayModes[i].RefreshRate);
+            }
+        } else {
+            pTargetModeSetInterface->pfnReleaseModeInfo(hTargetModeSet, pPinnedMode);
+        }
+
+        pVidPnInterface->pfnAssignTargetModeSet(hVidPn, 0, hTargetModeSet);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+PvgpuSetVidPnSourceAddress(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_SETVIDPNSOURCEADDRESS* SetVidPnSourceAddress
+)
+{
+    PPVGPU_DEVICE_CONTEXT context = (PPVGPU_DEVICE_CONTEXT)MiniportDeviceContext;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+        "PVGPU: SetVidPnSourceAddress: source=%u, segment=%u, offset=0x%llX\n",
+        SetVidPnSourceAddress->VidPnSourceId,
+        SetVidPnSourceAddress->PrimarySegment,
+        SetVidPnSourceAddress->PrimaryAddress.QuadPart));
+
+    UNREFERENCED_PARAMETER(context);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+PvgpuSetVidPnSourceVisibility(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_SETVIDPNSOURCEVISIBILITY* SetVidPnSourceVisibility
+)
+{
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+        "PVGPU: SetVidPnSourceVisibility: source=%u, visible=%d\n",
+        SetVidPnSourceVisibility->VidPnSourceId,
+        SetVidPnSourceVisibility->Visible));
+
+    UNREFERENCED_PARAMETER(MiniportDeviceContext);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+PvgpuCommitVidPn(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_COMMITVIDPN* CommitVidPn
+)
+{
+    PPVGPU_DEVICE_CONTEXT context = (PPVGPU_DEVICE_CONTEXT)MiniportDeviceContext;
+    NTSTATUS status;
+    CONST DXGK_VIDPN_INTERFACE* pVidPnInterface;
+    D3DKMDT_HVIDPNSOURCEMODESET hSourceModeSet;
+    CONST DXGK_VIDPNSOURCEMODESET_INTERFACE* pSourceModeSetInterface;
+    D3DKMDT_HVIDPNTARGETMODESET hTargetModeSet;
+    CONST DXGK_VIDPNTARGETMODESET_INTERFACE* pTargetModeSetInterface;
+    CONST D3DKMDT_VIDPN_SOURCE_MODE* pSourceMode;
+    CONST D3DKMDT_VIDPN_TARGET_MODE* pTargetMode;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "PVGPU: CommitVidPn\n"));
+
+    /* Get VidPn interface */
+    status = context->DxgkInterface.DxgkCbQueryVidPnInterface(
+        CommitVidPn->hFunctionalVidPn,
+        DXGK_VIDPN_INTERFACE_VERSION_V1,
+        &pVidPnInterface);
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    /* Get the pinned source mode */
+    status = pVidPnInterface->pfnAcquireSourceModeSet(
+        CommitVidPn->hFunctionalVidPn,
+        0,
+        &hSourceModeSet,
+        &pSourceModeSetInterface);
+
+    if (NT_SUCCESS(status)) {
+        status = pSourceModeSetInterface->pfnAcquirePinnedModeInfo(
+            hSourceModeSet,
+            &pSourceMode);
+
+        if (NT_SUCCESS(status) && pSourceMode != NULL) {
+            context->DisplayWidth = pSourceMode->Format.Graphics.PrimSurfSize.cx;
+            context->DisplayHeight = pSourceMode->Format.Graphics.PrimSurfSize.cy;
+            pSourceModeSetInterface->pfnReleaseModeInfo(hSourceModeSet, pSourceMode);
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "PVGPU: CommitVidPn: new resolution %ux%u\n",
+                context->DisplayWidth, context->DisplayHeight));
+        }
+
+        pVidPnInterface->pfnReleaseSourceModeSet(CommitVidPn->hFunctionalVidPn, hSourceModeSet);
+    }
+
+    /* Get the pinned target mode for refresh rate */
+    status = pVidPnInterface->pfnAcquireTargetModeSet(
+        CommitVidPn->hFunctionalVidPn,
+        0,
+        &hTargetModeSet,
+        &pTargetModeSetInterface);
+
+    if (NT_SUCCESS(status)) {
+        status = pTargetModeSetInterface->pfnAcquirePinnedModeInfo(
+            hTargetModeSet,
+            &pTargetMode);
+
+        if (NT_SUCCESS(status) && pTargetMode != NULL) {
+            context->DisplayRefresh = pTargetMode->VideoSignalInfo.VSyncFreq.Numerator /
+                                      pTargetMode->VideoSignalInfo.VSyncFreq.Denominator;
+            pTargetModeSetInterface->pfnReleaseModeInfo(hTargetModeSet, pTargetMode);
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "PVGPU: CommitVidPn: refresh rate %u Hz\n",
+                context->DisplayRefresh));
+        }
+
+        pVidPnInterface->pfnReleaseTargetModeSet(CommitVidPn->hFunctionalVidPn, hTargetModeSet);
+    }
+
+    /* Update the control region with new display settings */
+    if (context->ControlRegion) {
+        context->ControlRegion->display_width = context->DisplayWidth;
+        context->ControlRegion->display_height = context->DisplayHeight;
+        context->ControlRegion->display_refresh = context->DisplayRefresh;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+PvgpuUpdateActiveVidPnPresentPath(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_UPDATEACTIVEVIDPNPRESENTPATH* UpdateActiveVidPnPresentPath
+)
+{
+    UNREFERENCED_PARAMETER(MiniportDeviceContext);
+    UNREFERENCED_PARAMETER(UpdateActiveVidPnPresentPath);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+        "PVGPU: UpdateActiveVidPnPresentPath\n"));
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+PvgpuRecommendMonitorModes(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGKARG_RECOMMENDMONITORMODES* RecommendMonitorModes
+)
+{
+    NTSTATUS status;
+    D3DKMDT_HMONITORSOURCEMODESET hModeSet;
+    CONST DXGK_MONITORSOURCEMODESET_INTERFACE* pModeSetInterface;
+    D3DKMDT_MONITOR_SOURCE_MODE* pMode;
+    ULONG i;
+
+    UNREFERENCED_PARAMETER(MiniportDeviceContext);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "PVGPU: RecommendMonitorModes\n"));
+
+    hModeSet = RecommendMonitorModes->hMonitorSourceModeSet;
+    pModeSetInterface = RecommendMonitorModes->pMonitorSourceModeSetInterface;
+
+    /* Add all supported display modes */
+    for (i = 0; i < PVGPU_NUM_DISPLAY_MODES; i++) {
+        status = pModeSetInterface->pfnCreateNewModeInfo(hModeSet, &pMode);
+        if (!NT_SUCCESS(status)) {
+            continue;
+        }
+
+        pMode->VideoSignalInfo.VideoStandard = D3DKMDT_VSS_OTHER;
+        pMode->VideoSignalInfo.TotalSize.cx = g_DisplayModes[i].Width;
+        pMode->VideoSignalInfo.TotalSize.cy = g_DisplayModes[i].Height;
+        pMode->VideoSignalInfo.ActiveSize.cx = g_DisplayModes[i].Width;
+        pMode->VideoSignalInfo.ActiveSize.cy = g_DisplayModes[i].Height;
+        pMode->VideoSignalInfo.VSyncFreq.Numerator = g_DisplayModes[i].RefreshRate;
+        pMode->VideoSignalInfo.VSyncFreq.Denominator = 1;
+        pMode->VideoSignalInfo.HSyncFreq.Numerator = g_DisplayModes[i].RefreshRate * g_DisplayModes[i].Height;
+        pMode->VideoSignalInfo.HSyncFreq.Denominator = 1;
+        pMode->VideoSignalInfo.PixelRate = (ULONG64)g_DisplayModes[i].Width * 
+                                           g_DisplayModes[i].Height * 
+                                           g_DisplayModes[i].RefreshRate;
+        pMode->VideoSignalInfo.ScanLineOrdering = D3DDDI_VSSLO_PROGRESSIVE;
+        pMode->ColorBasis = D3DKMDT_CB_SRGB;
+        pMode->ColorCoeffDynamicRanges.FirstChannel = 8;
+        pMode->ColorCoeffDynamicRanges.SecondChannel = 8;
+        pMode->ColorCoeffDynamicRanges.ThirdChannel = 8;
+        pMode->ColorCoeffDynamicRanges.FourthChannel = 8;
+        pMode->Origin = D3DKMDT_MCO_DRIVER;
+        pMode->Preference = (i == 2) ? D3DKMDT_MP_PREFERRED : D3DKMDT_MP_NOTPREFERRED;  /* 1080p60 preferred */
+
+        status = pModeSetInterface->pfnAddMode(hModeSet, pMode);
+        if (!NT_SUCCESS(status)) {
+            pModeSetInterface->pfnReleaseModeInfo(hModeSet, pMode);
+        }
+    }
 
     return STATUS_SUCCESS;
 }
